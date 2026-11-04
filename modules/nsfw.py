@@ -25,8 +25,9 @@ from telegram.constants import ChatType
 
 import db
 from config import NSFW_THRESHOLD, SIGHTENGINE_SECRET, SIGHTENGINE_USER, SUPPORT_URL, UPDATES_URL
-from core import (command, cooldown_ok, esc, is_admin, log, mention, register_help, reply, split_quoted, args_text,
-                  target, temp_notice, watcher)
+from core import (command, cooldown_ok, esc, is_admin, log, mention, register_help, reply, resolve_user, split_quoted,
+                  args_text, target, temp_notice, watcher)
+from modules.guard import nsfw_card, protect_card, send_cards
 from modules.warns import ACTIONS, apply_action
 
 register_help("nsfw", [
@@ -34,6 +35,8 @@ register_help("nsfw", [
     ("nsfwaction", "Choose what happens to the sender: /nsfwaction delete|warn|mute|ban"),
     ("nsfwlevel", "How strict the image check is: /nsfwlevel strict|normal. Strict also removes partly nude / swimwear / lingerie pictures"),
     ("nsfwtest", "Admins: reply to a photo / sticker with /nsfwtest to see what the scanner finds in it"),
+    ("nsfwallow", "Exempt a user from the NSFW filter (reply or user id / @username). The card's Whitelist button does the same"),
+    ("nsfwunallow", "Remove a user's NSFW exemption"),
     ("nsfwlist", "Show the custom words blocked in this chat"),
     ("addnsfw", "Block an extra word or phrase: /addnsfw &lt;word&gt;"),
     ("rmnsfw", "Stop blocking a custom word: /rmnsfw &lt;word&gt;"),
@@ -52,7 +55,7 @@ DEFAULT_WORDS = (
 
 
 def get_cfg(chat_id):
-    return {"on": False, "action": "delete", "words": [], "level": "strict", **db.get(f"c:{chat_id}", "nsfw", {})}
+    return {"on": False, "action": "delete", "words": [], "level": "strict", "allow": [], **db.get(f"c:{chat_id}", "nsfw", {})}
 
 
 def save_cfg(chat_id, cfg):
@@ -65,9 +68,15 @@ def _word_re(words):
     return re.compile(r"(?<!\w)(" + "|".join(re.escape(w) for w in words) + r")(?!\w)", re.I)
 
 
-def text_hit(text, custom_words):
+def text_match(text, custom_words):
+    """The blocked word found in `text`, or None."""
     text = text.replace("\u200b", "").replace("\u200c", "").replace("\u200d", "")
-    return bool(_word_re(tuple(DEFAULT_WORDS) + tuple(custom_words)).search(text))
+    m = _word_re(tuple(DEFAULT_WORDS) + tuple(custom_words)).search(text)
+    return m.group(1).lower() if m else None
+
+
+def text_hit(text, custom_words):
+    return text_match(text, custom_words) is not None
 
 
 # ───────────────────────── image layer ─────────────────────────
@@ -275,7 +284,7 @@ async def cmd_nsfw(update, ctx):
         save_cfg(chat.id, cfg)
         return await reply(update, f"NSFW filter turned {'on' if cfg['on'] else 'off'}.")
     await reply(update, f"<b>NSFW filter</b> in {esc(chat.title)}: <b>{'on' if cfg['on'] else 'off'}</b>\n"
-                        f"Action: {cfg['action']}\nCustom words: {len(cfg['words'])}\n"
+                        f"Action: {cfg['action']}\nCustom words: {len(cfg['words'])}\nExempted users: {len(cfg['allow'])}\n"
                         f"Image scanning: {model_state()}\nStrictness: {cfg['level']}\n\n"
                         "Change with /nsfw on|off, /nsfwaction delete|warn|mute|ban and /nsfwlevel strict|normal.")
 
@@ -326,6 +335,33 @@ async def cmd_nsfwtest(update, ctx):
     await reply(update, f"<b>Scan result</b> (strictness: {level})\nExposed score: {info['exposed']:.2f}\n"
                         f"Revealing (swimwear/lingerie): {'yes' if info['revealing'] else 'no'}\n"
                         f"Would be removed: <b>{'YES' if is_adult(info, level) else 'no'}</b>\n\n{seen}")
+
+
+@command("nsfwallow")
+async def cmd_nsfwallow(update, ctx):
+    chat = await target(update, ctx)
+    if not chat:
+        return
+    r = await resolve_user(update, ctx, ctx.args)
+    if r:
+        cfg = get_cfg(chat.id)
+        if r[0] not in cfg["allow"]:
+            cfg["allow"].append(r[0])
+        save_cfg(chat.id, cfg)
+        await reply(update, f"{mention(r[0], r[1])} is exempt from the NSFW filter.")
+
+
+@command("nsfwunallow")
+async def cmd_nsfwunallow(update, ctx):
+    chat = await target(update, ctx)
+    if not chat:
+        return
+    r = await resolve_user(update, ctx, ctx.args)
+    if r:
+        cfg = get_cfg(chat.id)
+        cfg["allow"] = [u for u in cfg["allow"] if u != r[0]]
+        save_cfg(chat.id, cfg)
+        await reply(update, f"{mention(r[0], r[1])} is no longer exempt.")
 
 
 @command("nsfwlist")
@@ -379,21 +415,25 @@ async def nsfw_watcher(update, ctx):
     if chat.type == ChatType.PRIVATE:
         return
     cfg = db.get(f"c:{chat.id}", "nsfw")
-    if not cfg or not cfg.get("on"):
+    if not cfg or not cfg.get("on") or user.id in cfg.get("allow", []):
         return
     words, level = cfg.get("words", []), cfg.get("level", "strict")
     text = msg.text or msg.caption or ""
-    hit = bool(text) and text_hit(text, words)
+    word = text_match(text, words) if text else None
     ref = media_ref(msg) if MEDIA_SCAN else None
     pack = bool(msg.sticker) and await sticker_pack_hit(ctx, msg.sticker, words)
-    if not (hit or pack) and ref is None:
+    if not (word or pack) and ref is None:
         return
     admin = await is_admin(chat, user.id, ctx)
     if admin:
-        hit = False                      # admin text / commands are left alone; their pictures and stickers are not
+        word = None                      # admin text / commands are left alone; their pictures and stickers are not
         if not pack and ref is None:
             return
-    if not (hit or pack):
+    if word:
+        what = f"Keyword: {word}"
+    elif pack:
+        what = f"Adult sticker pack ({msg.sticker.set_name})"
+    else:
         try:
             info = await media_info(ref)
         except Exception:
@@ -406,6 +446,9 @@ async def nsfw_watcher(update, ctx):
                  info["revealing"], level, "REMOVE" if verdict else "ok")
         if not verdict:
             return
+        kind = "sticker" if msg.sticker else "image"
+        what = (f"Explicit {kind} ({info['exposed']:.0%})" if info["exposed"] >= min(NSFW_THRESHOLD, 0.3)
+                else f"Revealing {kind} (swimwear / lingerie)")
     try:
         await msg.delete()
     except Exception:
@@ -417,17 +460,20 @@ async def nsfw_watcher(update, ctx):
         return True
     if not cooldown_ok((chat.id, user.id, "nsfw")):
         return True
-    action = cfg.get("action", "delete")
+    n = (db.get(f"nw:{chat.id}", user.id) or 0) + 1
+    db.put(f"nw:{chat.id}", user.id, n)
+    action, result, muted = cfg.get("action", "delete"), "", False
     try:
         out = await apply_action(ctx, chat, user, action, "NSFW content")
+        if action == "mute":
+            result, muted = "🔇 <b>User Has Been Muted!</b>", True
+        elif action == "ban":
+            result = "🚫 <b>User Has Been Banned!</b>"
+        elif action == "warn" and out:
+            result = out
     except Exception:
         log.exception("nsfw action %s failed in %s", action, chat.id)
-        await temp_notice(ctx, chat.id, "⚠️ I need the right to delete messages and restrict / ban members.",
-                          reply_markup=_buttons())
-        return True
-    if out:
-        await ctx.bot.send_message(chat.id, out, reply_markup=_buttons())
-    else:
-        await temp_notice(ctx, chat.id, f"🔞 {mention(user.id, user.first_name)}, NSFW content isn't allowed in this group.",
-                          15, reply_markup=_buttons())
+        result = "⚠️ I need the right to delete messages and restrict / ban members."
+    await send_cards(ctx, chat, user, "nsfw", nsfw_card(user, what, n, result), protect_card(user, "nsfw", what, n),
+                     muted=muted, lasting=muted or action == "ban")
     return True
