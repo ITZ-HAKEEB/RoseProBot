@@ -159,8 +159,13 @@ async def resolve_user(update, ctx, args):
     return None
 
 
+# Premium (custom) emoji are stored in the text as  ![😀](emoji:5368324170671202286)
+CUSTOM_EMOJI_MD = re.compile(r"!\[([^\]\n]+)\]\(emoji:(\d+)\)")
+
+
 def md_to_html(text):
     t = esc(text)
+    t = CUSTOM_EMOJI_MD.sub(r'<tg-emoji emoji-id="\2">\1</tg-emoji>', t)
     t = re.sub(r"```(.+?)```", r"<pre>\1</pre>", t, flags=re.S)
     t = re.sub(r"`([^`\n]+)`", r"<code>\1</code>", t)
     t = re.sub(r"\[([^\]\n]+)\]\((https?://[^)\s]+|tg://[^)\s]+)\)", r'<a href="\2">\1</a>', t)
@@ -196,10 +201,15 @@ def _links_to_buttons(raw):
 
 
 def md_from_entities(text, entities):
-    """Turn Telegram's own hidden links (text_link entities) into [text](url) so they survive as plain text."""
+    """Keep Telegram's own formatting that plain text would lose:
+    hidden links (text_link) -> [text](url) and premium emoji (custom_emoji) -> ![😀](emoji:ID)."""
     text = text or ""
-    ents = sorted((e for e in (entities or []) if e.type == "text_link" and getattr(e, "url", None)),
-                  key=lambda e: e.offset)
+
+    def wanted(e):
+        return ((e.type == "text_link" and getattr(e, "url", None))
+                or (e.type == "custom_emoji" and getattr(e, "custom_emoji_id", None)))
+
+    ents = sorted((e for e in (entities or []) if wanted(e)), key=lambda e: e.offset)
     if not ents:
         return text
     b, out, pos = text.encode("utf-16-le"), [], 0          # entity offsets are UTF-16 code units
@@ -207,10 +217,16 @@ def md_from_entities(text, entities):
         if e.offset < pos:
             continue
         out.append(b[pos * 2:e.offset * 2].decode("utf-16-le"))
-        out.append(f"[{b[e.offset * 2:(e.offset + e.length) * 2].decode('utf-16-le')}]({e.url})")
+        label = b[e.offset * 2:(e.offset + e.length) * 2].decode("utf-16-le")
+        out.append(f"![{label}](emoji:{e.custom_emoji_id})" if e.type == "custom_emoji" else f"[{label}]({e.url})")
         pos = e.offset + e.length
     out.append(b[pos * 2:].decode("utf-16-le"))
     return "".join(out)
+
+
+def visible_len(raw):
+    """Length of a template as the user sees it (a premium emoji counts as its 1-2 emoji characters)."""
+    return len(CUSTOM_EMOJI_MD.sub(r"\1", raw or ""))
 
 
 def parse_buttons(raw, link_lines=False):
