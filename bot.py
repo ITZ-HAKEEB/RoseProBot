@@ -4,17 +4,48 @@ import re
 
 from telegram import LinkPreviewOptions, Update
 from telegram.constants import ChatType
-from telegram.ext import Application, CallbackQueryHandler, Defaults, MessageHandler, filters
+from telegram.ext import Application, CallbackQueryHandler, ChatMemberHandler, Defaults, MessageHandler, filters
 
 import config
 import core
 import db
 import modules  # noqa: F401  (registers every command / watcher / help section)
-from core import COMMANDS, esc, is_admin, log, reply
+from core import fmt_time, now
+from core import COMMANDS, esc, is_admin, log, reply, send_log, track_chat, mention
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
 CMD_RE = re.compile(r"^([/!])(\w+)(?:@(\w+))?(?:\s|$)")
+
+
+async def log_new_chat(ctx, chat, user):
+    if chat.type == ChatType.PRIVATE:
+        await send_log(ctx.bot, f"👤 <b>New user</b>\n{mention(user.id, user.first_name)}\nID: <code>{user.id}</code>")
+    else:
+        await send_log(ctx.bot, f"➕ <b>New group</b>\n{esc(chat.title)}\nID: <code>{chat.id}</code>")
+
+
+async def on_my_chat_member(update, ctx):
+    """Bot added to / removed from a chat, or a user blocked / unblocked the bot."""
+    ev, chat = update.my_chat_member, update.effective_chat
+    old, new = ev.old_chat_member.status, ev.new_chat_member.status
+    scope = "bc_users" if chat.type == ChatType.PRIVATE else "bc_chats"
+    if new in ("left", "kicked"):
+        db.delete(scope, chat.id)
+        core._SEEN.discard(chat.id)
+        if chat.type != ChatType.PRIVATE:
+            await send_log(ctx.bot, f"➖ <b>Removed from group</b>\n{esc(chat.title)}\nID: <code>{chat.id}</code>\nBy: {mention(ev.from_user.id, ev.from_user.first_name)}")
+    elif old in ("left", "kicked") and new in ("member", "administrator"):
+        if track_chat(chat):
+            await log_new_chat(ctx, chat, ev.from_user)
+
+
+async def post_init(app):
+    """Runs on every start: tells the log chat the bot is up (one message per start)."""
+    me = await app.bot.get_me()
+    log.info("Logged in as @%s", me.username)
+    await send_log(app.bot, f"✅ <b>Bot started</b>\n@{esc(me.username)}\n🕒 {fmt_time(now())}\n"
+                            f"⚙️ {len(COMMANDS)} commands, {len(core.WATCHERS)} watchers")
 
 
 async def dispatcher(update, ctx):
@@ -29,6 +60,8 @@ async def dispatcher(update, ctx):
     if not fn:
         return
     chat, user = update.effective_chat, update.effective_user
+    if track_chat(chat):
+        await log_new_chat(ctx, chat, user)
     if chat.type != ChatType.PRIVATE and name in db.get(f"c:{chat.id}", "disabled", []):
         if not await is_admin(chat, user.id, ctx):
             return
@@ -48,6 +81,8 @@ async def watcher(update, ctx):
     msg, user = update.effective_message, update.effective_user
     if not msg or not user or user.is_bot:
         return
+    if track_chat(update.effective_chat):
+        await log_new_chat(ctx, update.effective_chat, user)
     for _, fn in core.WATCHERS:
         try:
             if await fn(update, ctx):
@@ -84,7 +119,8 @@ async def on_error(update, ctx):
 def main():
     app = (Application.builder().token(config.TOKEN)
            .defaults(Defaults(parse_mode="HTML", link_preview_options=LinkPreviewOptions(is_disabled=True)))
-           .build())
+           .post_init(post_init).build())
+    app.add_handler(ChatMemberHandler(on_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.UpdateType.EDITED_MESSAGE, dispatcher), group=0)
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_join), group=0)
     app.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, on_left), group=0)
