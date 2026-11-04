@@ -3,6 +3,7 @@ import logging
 import os
 import platform
 import re
+import time
 
 import telegram
 
@@ -126,13 +127,24 @@ async def watcher(update, ctx):
             log.exception("watcher %s failed", fn.__name__)
 
 
-async def _run_join(update, ctx, u, adder_admin):
-    """Run every join hook for one user. A user is handled once per 30 s even if Telegram reports the join twice
-    (service message AND chat_member update)."""
-    chat = update.effective_chat
-    if not core.cooldown_ok(("join", chat.id, u.id), 30):
+_RECENT = {}      # (kind, chat_id, user_id) -> monotonic time: stops a join/leave being handled twice
+
+
+def _first_time(kind, chat_id, user_id, window=60):
+    """True if this join/leave was not already handled in the last `window` seconds."""
+    t = time.monotonic()
+    if len(_RECENT) > 5000:
+        _RECENT.clear()
+    key = (kind, chat_id, user_id)
+    if t - _RECENT.get(key, -1e9) < window:
+        return False
+    _RECENT[key] = t
+    return True
+
+
+async def _run_join_hooks(update, ctx, u, adder_admin):
+    if not _first_time("join", update.effective_chat.id, u.id):
         return
-    log.info("join: user %s in chat %s", u.id, chat.id)
     for _, hook in core.JOIN_HOOKS:
         try:
             if await hook(update, ctx, u, adder_admin):
@@ -141,11 +153,9 @@ async def _run_join(update, ctx, u, adder_admin):
             log.exception("join hook %s failed", hook.__name__)
 
 
-async def _run_left(update, ctx, u):
-    chat = update.effective_chat
-    if not core.cooldown_ok(("left", chat.id, u.id), 30):
+async def _run_left_hooks(update, ctx, u):
+    if not _first_time("left", update.effective_chat.id, u.id):
         return
-    log.info("left: user %s in chat %s", u.id, chat.id)
     for hook in core.LEFT_HOOKS:
         try:
             await hook(update, ctx, u)
@@ -154,33 +164,35 @@ async def _run_left(update, ctx, u):
 
 
 async def on_join(update, ctx):
+    """Join service message. Telegram only sends it in small groups (up to ~100 members)."""
     msg, chat = update.effective_message, update.effective_chat
     adder_admin = await is_admin(chat, msg.from_user.id, ctx) if msg.from_user else True
     for u in msg.new_chat_members:
-        await _run_join(update, ctx, u, adder_admin)
+        await _run_join_hooks(update, ctx, u, adder_admin)
 
 
 async def on_left(update, ctx):
-    await _run_left(update, ctx, update.effective_message.left_chat_member)
+    """Leave service message. Telegram only sends it in small groups (up to ~100 members)."""
+    await _run_left_hooks(update, ctx, update.effective_message.left_chat_member)
 
 
-def _is_in(cm):
-    return cm.status in ("member", "administrator", "creator") or (cm.status == "restricted" and getattr(cm, "is_member", False))
+def _is_in(status, member):
+    return status in ("member", "administrator", "creator") or (status == "restricted" and getattr(member, "is_member", False))
 
 
 async def on_chat_member(update, ctx):
-    """Fallback for groups where Telegram sends no 'user joined' service message (big groups, hidden joins,
-    joins via invite link). Needs the bot to be admin in the group."""
+    """Join/leave of ANY member via chat_member updates. This is what works in groups over 100 members,
+    where Telegram stops sending join/leave service messages. (The bot must be an admin of the group.)"""
     ev, chat = update.chat_member, update.effective_chat
     if chat.type == ChatType.PRIVATE:
         return
-    was, now_in = _is_in(ev.old_chat_member), _is_in(ev.new_chat_member)
+    was_in, now_in = _is_in(ev.old_chat_member.status, ev.old_chat_member), _is_in(ev.new_chat_member.status, ev.new_chat_member)
     u = ev.new_chat_member.user
-    if not was and now_in:
-        adder_admin = await is_admin(chat, ev.from_user.id, ctx) if ev.from_user and ev.from_user.id != u.id else False
-        await _run_join(update, ctx, u, adder_admin)
-    elif was and not now_in:
-        await _run_left(update, ctx, u)
+    if not was_in and now_in:
+        adder_admin = ev.from_user.id != u.id and await is_admin(chat, ev.from_user.id, ctx)
+        await _run_join_hooks(update, ctx, u, adder_admin)
+    elif was_in and not now_in:
+        await _run_left_hooks(update, ctx, u)
 
 
 async def on_error(update, ctx):
@@ -193,7 +205,7 @@ def main():
            .post_init(post_init).build())
     app.add_handler(ChatJoinRequestHandler(on_join_request))
     app.add_handler(ChatMemberHandler(on_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
-    app.add_handler(ChatMemberHandler(on_chat_member, ChatMemberHandler.CHAT_MEMBER))
+    app.add_handler(ChatMemberHandler(on_chat_member, ChatMemberHandler.CHAT_MEMBER))   # joins/leaves in big groups
     app.add_handler(MessageHandler((filters.TEXT | filters.CAPTION) & ~filters.UpdateType.EDITED_MESSAGE, dispatcher), group=0)
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_join), group=0)
     app.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, on_left), group=0)
