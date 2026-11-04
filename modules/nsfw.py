@@ -1,23 +1,30 @@
-"""Anti-NSFW filter for groups.
+"""Anti-NSFW filter for groups. Works fully offline, no API key needed.
 
 Two layers:
-  1. Text layer (always works): keywords in messages / captions. A built-in list of high-signal terms plus
-     your own words per chat (/addnsfw, /rmnsfw).
-  2. Image layer (optional): photos, stickers, GIFs, videos and round videos are checked through the
-     Sightengine nudity API via their preview image. Turn it on by setting the SIGHTENGINE_USER and
-     SIGHTENGINE_SECRET environment variables. To use another provider, only edit `scan_image()`.
+  1. Text layer: keywords in messages / captions. A built-in list of high-signal terms plus your own words per
+     chat (/addnsfw, /rmnsfw).
+  2. Image layer: photos, stickers, GIFs, videos, round videos and image files are checked LOCALLY with the
+     NudeNet model (runs on the bot's own CPU, nothing is sent anywhere). For videos / GIFs / animated stickers
+     the preview frame is checked. If the `nudenet` package is missing the image layer is simply off.
+     (Optional: if you set SIGHTENGINE_USER / SIGHTENGINE_SECRET and NudeNet is not installed, Sightengine is used.)
 
 Admins are never touched. The bot needs the "delete messages" right (and "restrict members" for mute / ban).
 """
 import asyncio
+import importlib.util
+import io
+import os
 import re
+import tempfile
+import threading
 from functools import lru_cache
 
 import httpx
+from telegram import InlineKeyboardButton as Btn, InlineKeyboardMarkup as Markup
 from telegram.constants import ChatType
 
 import db
-from config import NSFW_THRESHOLD, SIGHTENGINE_SECRET, SIGHTENGINE_USER
+from config import NSFW_THRESHOLD, SIGHTENGINE_SECRET, SIGHTENGINE_USER, SUPPORT_URL, UPDATES_URL
 from core import (command, cooldown_ok, esc, is_admin, log, mention, register_help, reply, split_quoted, args_text,
                   target, temp_notice, watcher)
 from modules.warns import ACTIONS, apply_action
@@ -30,12 +37,15 @@ register_help("nsfw", [
     ("rmnsfw", "Stop blocking a custom word: /rmnsfw &lt;word&gt;"),
 ])
 
-MEDIA_SCAN = bool(SIGHTENGINE_USER and SIGHTENGINE_SECRET)
+LOCAL_SCAN = importlib.util.find_spec("nudenet") is not None and importlib.util.find_spec("PIL") is not None
+API_SCAN = bool(SIGHTENGINE_USER and SIGHTENGINE_SECRET)
+MEDIA_SCAN = LOCAL_SCAN or API_SCAN
 
 # Built-in, deliberately short list of high-signal terms. Admins can extend it per chat.
 DEFAULT_WORDS = (
     "porn", "porno", "pornhub", "xvideos", "xnxx", "xxx", "nsfw", "hentai", "onlyfans", "nudes",
     "sex video", "sex videos", "blowjob", "camgirl", "adult video", "adult videos",
+    "xhamster", "redtube", "brazzers", "chudai", "sexchat", "sex chat", "nude", "naked pics", "nude pics",
 )
 
 
@@ -63,7 +73,7 @@ _SCANNED = {}  # file_unique_id -> score (avoids paying twice for the same file)
 
 
 def media_ref(msg):
-    """The part of a message that can be sent to an image classifier (a downloadable file object)."""
+    """The part of a message that can be checked as an image (a downloadable file object), or None."""
     if msg.photo:
         sizes = sorted(msg.photo, key=lambda p: p.width * p.height)
         return next((p for p in sizes if max(p.width, p.height) >= 640), sizes[-1])
@@ -76,14 +86,74 @@ def media_ref(msg):
         return msg.video.thumbnail
     if msg.video_note:
         return msg.video_note.thumbnail
+    d = msg.document                      # a picture sent "as file"
+    if d and (d.mime_type or "").startswith("image/") and (d.file_size or 0) < 8_000_000:
+        return d
     return None
 
 
-async def scan_image(data):
-    """Return a 0..1 'adult content' score for image bytes, or None if the scan failed.
+# --- local model (NudeNet) ---
+_DET = None
+_DET_ERR = None
+_DET_LOCK = threading.Lock()
 
-    Provider: Sightengine nudity model. Swap this function to use a different service.
-    """
+
+def _load_detector():
+    global _DET, _DET_ERR
+    if _DET is not None or _DET_ERR:
+        return _DET
+    with _DET_LOCK:
+        if _DET is None and not _DET_ERR:
+            try:
+                from nudenet import NudeDetector
+                _DET = NudeDetector()
+                log.info("NSFW: local NudeNet model loaded")
+            except Exception as e:
+                _DET_ERR = f"{type(e).__name__}: {e}"
+                log.error("NSFW: could not load NudeNet (%s): image scanning is OFF", _DET_ERR)
+    return _DET
+
+
+def _label_is_adult(label):
+    """Exposed genitalia / buttocks / anus / female breast. Covered parts, belly, feet, male chest are ignored."""
+    l = str(label).upper()
+    if "EXPOSED" not in l or not any(k in l for k in ("GENITALIA", "BUTTOCKS", "ANUS", "BREAST")):
+        return False
+    if "BREAST" in l and (l.startswith("MALE") or l.endswith("_M")):
+        return False
+    return True
+
+
+def adult_score(detections):
+    return max((float(d.get("score", 0) or 0) for d in detections if _label_is_adult(d.get("class", ""))), default=0.0)
+
+
+def _scan_local_sync(data):
+    det = _load_detector()
+    if det is None:
+        return None
+    from PIL import Image
+    img = Image.open(io.BytesIO(data))
+    if img.mode in ("RGBA", "LA", "P"):                       # transparent stickers: put them on white
+        img = img.convert("RGBA")
+        bg = Image.new("RGB", img.size, (255, 255, 255))
+        bg.paste(img, mask=img.split()[-1])
+        img = bg
+    else:
+        img = img.convert("RGB")
+    fd, path = tempfile.mkstemp(suffix=".jpg")
+    os.close(fd)
+    try:
+        img.save(path, "JPEG", quality=92)
+        return adult_score(det.detect(path))
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+async def _scan_sightengine(data):
     try:
         async with httpx.AsyncClient(timeout=15) as c:
             r = await c.post(
@@ -100,6 +170,21 @@ async def scan_image(data):
         return None
     n = j.get("nudity", {})
     return max(float(n.get(k, 0) or 0) for k in ("sexual_activity", "sexual_display", "erotica"))
+
+
+async def scan_image(data):
+    """0..1 'adult content' score for image bytes, or None if the scan was not possible."""
+    if LOCAL_SCAN:
+        try:
+            score = await asyncio.to_thread(_scan_local_sync, data)
+        except Exception:
+            log.exception("nsfw local scan failed")
+            score = None
+        if score is not None or not API_SCAN:
+            return score
+    if API_SCAN:
+        return await _scan_sightengine(data)
+    return None
 
 
 async def media_score(ref):
@@ -129,7 +214,7 @@ async def cmd_nsfw(update, ctx):
         return await reply(update, f"NSFW filter turned {'on' if cfg['on'] else 'off'}.")
     await reply(update, f"<b>NSFW filter</b> in {esc(chat.title)}: <b>{'on' if cfg['on'] else 'off'}</b>\n"
                         f"Action: {cfg['action']}\nCustom words: {len(cfg['words'])}\n"
-                        f"Image scanning: {'on' if MEDIA_SCAN else 'off (needs SIGHTENGINE_USER / SIGHTENGINE_SECRET)'}\n\n"
+                        f"Image scanning: {'on (local, no API)' if LOCAL_SCAN else 'on (Sightengine)' if API_SCAN else 'off (nudenet is not installed)'}\n\n"
                         "Change with /nsfw on|off and /nsfwaction delete|warn|mute|ban.")
 
 
@@ -187,6 +272,10 @@ async def cmd_rmnsfw(update, ctx):
 
 
 # ───────────────────────── watcher ─────────────────────────
+def _buttons():
+    return Markup([[Btn("📢 Updates", url=UPDATES_URL), Btn("💬 Support", url=SUPPORT_URL)]])
+
+
 @watcher(50)
 async def nsfw_watcher(update, ctx):
     chat, user, msg = update.effective_chat, update.effective_user, update.effective_message
@@ -221,10 +310,12 @@ async def nsfw_watcher(update, ctx):
         out = await apply_action(ctx, chat, user, action, "NSFW content")
     except Exception:
         log.exception("nsfw action %s failed in %s", action, chat.id)
-        await temp_notice(ctx, chat.id, "⚠️ I need the right to delete messages and restrict / ban members.")
+        await temp_notice(ctx, chat.id, "⚠️ I need the right to delete messages and restrict / ban members.",
+                          reply_markup=_buttons())
         return True
     if out:
-        await ctx.bot.send_message(chat.id, out)
+        await ctx.bot.send_message(chat.id, out, reply_markup=_buttons())
     else:
-        await temp_notice(ctx, chat.id, f"🔞 {mention(user.id, user.first_name)}, NSFW content isn't allowed in this group.")
+        await temp_notice(ctx, chat.id, f"🔞 {mention(user.id, user.first_name)}, NSFW content isn't allowed in this group.",
+                          15, reply_markup=_buttons())
     return True
