@@ -475,5 +475,5 @@ async def nsfw_watcher(update, ctx):
         log.exception("nsfw action %s failed in %s", action, chat.id)
         result = "⚠️ I need the right to delete messages and restrict / ban members."
     await send_cards(ctx, chat, user, "nsfw", nsfw_card(user, what, n, result), protect_card(user, "nsfw", what, n),
-                     muted=muted, lasting=muted or action == "ban")
+                     muted=muted)
     return True
