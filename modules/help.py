@@ -4,7 +4,7 @@ from telegram.constants import ChatType
 
 import db
 from config import SUPPORT_URL, UPDATES_URL
-from core import HELP, build_message, callback, command, esc, mention, reply, send_log, user_photo
+from core import HELP, build_message, callback, command, esc, mention, reply, sbtn, send_log, user_photo
 
 # Order of the buttons in /help; sections that are not listed here are appended at the end.
 HELP_ORDER = ["federation", "filters", "locks", "notes", "reports", "user", "welcome", "moderation",
@@ -27,8 +27,9 @@ def help_text(section):
 
 def help_markup():
     names = help_sections()
-    rows = [[Btn(LABELS.get(s, s.title()), callback_data=f"help:{s}") for s in names[i:i + 2]] for i in range(0, len(names), 2)]
-    rows.append([Btn("close", callback_data="help:close")])
+    rows = [[sbtn(LABELS.get(s, s.title()), "primary", callback_data=f"help:{s}") for s in names[i:i + 2]]
+            for i in range(0, len(names), 2)]
+    rows.append([sbtn("close", "danger", callback_data="help:close")])
     return Markup(rows)
 
 
@@ -42,13 +43,13 @@ async def help_cb(update, ctx):
     elif arg == "back":
         await q.message.edit_text(HELP_HEADER, reply_markup=help_markup())
     elif arg in HELP:
-        await q.message.edit_text(help_text(arg), reply_markup=Markup([[Btn("Back", callback_data="help:back")]]))
+        await q.message.edit_text(help_text(arg), reply_markup=Markup([[sbtn("Back", "primary", callback_data="help:back")]]))
 
 
 @command("help")
 async def cmd_help(update, ctx):
     if update.effective_chat.type != ChatType.PRIVATE:
-        kb = Markup([[Btn("Help", url=f"https://t.me/{ctx.bot.username}?start=help")]])
+        kb = Markup([[sbtn("Help", "primary", url=f"https://t.me/{ctx.bot.username}?start=help")]])
         return await reply(update, "Contact me in private for the full command list.", reply_markup=kb)
     await reply(update, HELP_HEADER, reply_markup=help_markup())
 
@@ -78,8 +79,8 @@ async def cmd_start(update, ctx):
     text = (f"Hi {mention(user.id, user.first_name)}!\nI'm a group management bot: moderation, warnings, "
             "notes, locks, welcome messages and more.\n\nAdd me to your group as an admin to get started.")
     kb = Markup([
-        [Btn("Add me to a group", url=f"https://t.me/{ctx.bot.username}?startgroup=true&admin=delete_messages+restrict_members+pin_messages+invite_users")],
-        [Btn("support", url=SUPPORT_URL), Btn("updates", url=UPDATES_URL)],
-        [Btn("Help", callback_data="help:back")],
+        [sbtn("Add me to a group", "primary", url=f"https://t.me/{ctx.bot.username}?startgroup=true&admin=delete_messages+restrict_members+pin_messages+invite_users")],
+        [sbtn("support", "success", url=SUPPORT_URL), sbtn("updates", "success", url=UPDATES_URL)],
+        [sbtn("Help", "primary", callback_data="help:back")],
     ])
     await reply(update, text, reply_markup=kb)
