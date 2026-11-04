@@ -3,4 +3,3 @@ httpx>=0.27,<0.28
 SQLAlchemy==2.0.35
 psycopg2-binary==2.9.9
 pymongo[srv]>=4.8,<5
-
