@@ -3,8 +3,8 @@ import os
 
 TOKEN = os.environ["BOT_TOKEN"]
 OWNER_ID = int(os.environ.get("OWNER_ID", "0") or 0)
-SUPPORT_URL = os.environ.get("SUPPORT_URL", "https://t.me/telegram")
-UPDATES_URL = os.environ.get("UPDATES_URL", "https://t.me/telegram")
+SUPPORT_URL = os.environ.get("SUPPORT_URL", "https://t.me/kirti_bots_support")
+UPDATES_URL = os.environ.get("UPDATES_URL", "https://t.me/kirti_bots")
 SUDO = {OWNER_ID} if OWNER_ID else set()
 
 # Optional: image scanning for the NSFW module (https://sightengine.com, free tier available).
