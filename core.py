@@ -173,18 +173,61 @@ def md_to_html(text):
 
 
 # [Label](buttonurl://https://example.com[:same][:primary|:success|:danger|:default])
-BTN_RE = re.compile(r"\[([^\]\n]+)\]\(buttonurl://([^)\s]+?)((?::(?:same|primary|success|danger|default))*)\)")
+# Lenient on purpose: case-insensitive, "buttonurl:" with or without //, spaces before the modifiers, t.me/x or @user links.
+BTN_RE = re.compile(r"\[([^\]\n]+)\]\(\s*buttonurl:(?://)?\s*([^)\s]+?)((?:\s*:(?:same|primary|success|danger|default))*)\s*\)", re.I)
 MAX_BUTTONS, BUTTONS_PER_ROW = 8, 4
 BUTTON_STYLES = ("primary", "success", "danger")   # blue / green / red (Bot API 9.4+, newer Telegram clients)
+BTN_FORMAT_HELP = "Use: [Text](buttonurl://https://example.com) — one button per line, no spaces inside the ( )."
 
 
-def parse_buttons(raw):
-    """Split a message template into (text without button lines, button rows, error or None)."""
-    rows, state = [], {"n": 0, "err": None}
+LINK_LINE_RE = re.compile(r"^\s*(?:\[[^\]\n]+\]\(\s*(?:https?|tg)://[^)\s]+\s*\)\s*)+$", re.I)
+LINK_RE_1 = re.compile(r"\[([^\]\n]+)\]\(\s*((?:https?|tg)://[^)\s]+)\s*\)", re.I)
+
+
+def _links_to_buttons(raw):
+    """A line made only of [Text](https://link) items becomes buttons (items after the first stay on the same row)."""
+    out = []
+    for line in (raw or "").split("\n"):
+        if LINK_LINE_RE.match(line):
+            items = LINK_RE_1.findall(line)
+            line = "\n".join(f"[{t}](buttonurl://{u}{':same' if i else ''})" for i, (t, u) in enumerate(items))
+        out.append(line)
+    return "\n".join(out)
+
+
+def md_from_entities(text, entities):
+    """Turn Telegram's own hidden links (text_link entities) into [text](url) so they survive as plain text."""
+    text = text or ""
+    ents = sorted((e for e in (entities or []) if e.type == "text_link" and getattr(e, "url", None)),
+                  key=lambda e: e.offset)
+    if not ents:
+        return text
+    b, out, pos = text.encode("utf-16-le"), [], 0          # entity offsets are UTF-16 code units
+    for e in ents:
+        if e.offset < pos:
+            continue
+        out.append(b[pos * 2:e.offset * 2].decode("utf-16-le"))
+        out.append(f"[{b[e.offset * 2:(e.offset + e.length) * 2].decode('utf-16-le')}]({e.url})")
+        pos = e.offset + e.length
+    out.append(b[pos * 2:].decode("utf-16-le"))
+    return "".join(out)
+
+
+def parse_buttons(raw, link_lines=False):
+    """Split a message template into (text without button lines, button rows, error or None).
+
+    link_lines=True (welcome/goodbye): a line that contains only [Text](https://...) links is treated as buttons too.
+    """
+    if link_lines:
+        raw = _links_to_buttons(raw)
+    rows, state = [], {"n": 0, "seen": 0, "err": None}
 
     def grab(m):
+        state["seen"] += 1
         label, url = m.group(1), m.group(2)
-        mods = {x for x in m.group(3).split(":") if x}
+        mods = set(re.findall(r"[a-z]+", m.group(3).lower()))
+        if url.startswith("@"):
+            url = "https://t.me/" + url[1:]
         if not re.match(r"^[a-z][a-z0-9+.-]*://", url, re.I):
             url = "https://" + url
         if not re.match(r"^(https?|tg)://", url, re.I):
@@ -203,12 +246,14 @@ def parse_buttons(raw):
         return ""
 
     text = BTN_RE.sub(grab, raw or "").strip()
+    if not state["err"] and (raw or "").lower().count("buttonurl") > state["seen"]:
+        state["err"] = "I couldn't read one of the buttons. " + BTN_FORMAT_HELP
     return text, rows, state["err"]
 
 
-def build_message(raw, fill=None):
+def build_message(raw, fill=None, link_lines=False):
     """Markdown + buttons + placeholders -> (html_text, markup|None)."""
-    raw, rows, _ = parse_buttons(raw)
+    raw, rows, _ = parse_buttons(raw, link_lines)
     out = md_to_html(raw)
     for k, v in (fill or {}).items():
         out = out.replace("{" + k + "}", v)
