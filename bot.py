@@ -1,5 +1,6 @@
 """Entry point. Features live in modules/, shared plumbing in core.py, settings in config.py."""
 import logging
+import os
 import platform
 import re
 
@@ -7,14 +8,15 @@ import telegram
 
 from telegram import LinkPreviewOptions, Update
 from telegram.constants import ChatType
-from telegram.ext import Application, CallbackQueryHandler, ChatMemberHandler, Defaults, MessageHandler, filters
+from telegram.ext import Application, CallbackQueryHandler, ChatJoinRequestHandler, ChatMemberHandler, Defaults, MessageHandler, filters
 
 import config
 import core
 import db
 import modules  # noqa: F401  (registers every command / watcher / help section)
+from modules.joinreq import on_join_request
 from core import fmt_time, now
-from core import COMMANDS, esc, is_admin, log, reply, send_log, track_chat, mention
+from core import COMMANDS, chat_photo, user_photo, esc, is_admin, log, reply, send_log, track_chat, mention
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
@@ -27,7 +29,8 @@ async def log_new_chat(ctx, chat, user, ev_from=None):
         await send_log(ctx.bot, f"👤 <b>New user</b>\n{mention(user.id, user.first_name)}\nID: <code>{user.id}</code>")
     else:
         by = ev_from
-        await send_log(ctx.bot, f"➕ <b>New group</b>\n{esc(chat.title)}\nID: <code>{chat.id}</code>\nAdded by: {mention(by.id, by.first_name)} (<code>{by.id}</code>)")
+        await send_log(ctx.bot, f"➕ <b>New group</b>\n{esc(chat.title)}\nID: <code>{chat.id}</code>\nAdded by: {mention(by.id, by.first_name)} (<code>{by.id}</code>)",
+                       photo=await chat_photo(ctx.bot, chat.id))
 
 
 async def on_my_chat_member(update, ctx):
@@ -53,7 +56,12 @@ async def post_init(app):
     n = (db.get("meta", "starts", 0) or 0) + 1
     db.put("meta", "starts", n)
     users, groups = len(db.scope_keys("bc_users")), len(db.scope_keys("bc_chats"))
-    db_kind = "PostgreSQL" if db.engine.dialect.name.startswith("postgres") else "SQLite"
+    db_kind = db.kind
+    if db_kind == "SQLite" and os.environ.get("DYNO"):
+        db_kind += " ⚠️ TEMPORARY - Heroku wipes it on restart! Set MONGO_URL (MongoDB) or DATABASE_URL (Postgres)"
+        log.warning("temporary SQLite on Heroku: settings will be lost on restart")
+    saved = db.count()
+    log.info("Database: %s, %d saved settings loaded", db_kind, saved)
     await send_log(app.bot,
         "✅ <b>BOT STARTED</b>\n"
         "━━━━━━━━━━━━━━━━━━\n"
@@ -68,15 +76,18 @@ async def post_init(app):
         f"👥 <b>Groups:</b> {groups}\n"
         "━━━━━━━━━━━━━━━━━━\n"
         f"🗄 <b>Database:</b> {db_kind}\n"
+        f"💾 <b>Saved settings:</b> {saved}\n"
         f"🐍 <b>Python:</b> {platform.python_version()}\n"
         f"📦 <b>PTB:</b> {telegram.__version__}\n"
         f"💻 <b>Host:</b> {esc(platform.system())} {esc(platform.machine())}\n"
-        "🟢 <b>Status:</b> Online and ready")
+        "🟢 <b>Status:</b> Online and ready",
+        photo=await user_photo(app.bot, me.id))
 
 
 async def dispatcher(update, ctx):
     msg = update.effective_message
-    m = CMD_RE.match(msg.text or "")
+    text = msg.text or msg.caption or ""          # a video/photo sent WITH "/setwelcome ..." as caption is a command too
+    m = CMD_RE.match(text)
     if not m:
         return
     name, tag = m.group(2).lower(), m.group(3)
@@ -90,7 +101,7 @@ async def dispatcher(update, ctx):
     if chat.type != ChatType.PRIVATE and name in db.get(f"c:{chat.id}", "disabled", []):
         if not await is_admin(chat, user.id, ctx):
             return
-    ctx.args = (msg.text or "").split()[1:]
+    ctx.args = text.split()[1:]
     try:
         await fn(update, ctx)
     except Exception as e:
@@ -144,8 +155,9 @@ def main():
     app = (Application.builder().token(config.TOKEN)
            .defaults(Defaults(parse_mode="HTML", link_preview_options=LinkPreviewOptions(is_disabled=True)))
            .post_init(post_init).build())
+    app.add_handler(ChatJoinRequestHandler(on_join_request))
     app.add_handler(ChatMemberHandler(on_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.UpdateType.EDITED_MESSAGE, dispatcher), group=0)
+    app.add_handler(MessageHandler((filters.TEXT | filters.CAPTION) & ~filters.UpdateType.EDITED_MESSAGE, dispatcher), group=0)
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_join), group=0)
     app.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, on_left), group=0)
     app.add_handler(MessageHandler(filters.ChatType.GROUPS & ~filters.StatusUpdate.ALL & ~filters.UpdateType.EDITED_MESSAGE,
