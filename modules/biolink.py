@@ -27,8 +27,10 @@ register_help("biolink", [
     ("biolinkallowed", "List the exempted users"),
 ])
 
-BIO_TTL = 600  # seconds a bio is cached
+BIO_TTL = 600   # seconds a clean bio is cached
+LINK_TTL = 10   # a bio WITH a link is re-checked this often, so removing the link works almost at once
 _BIO = {}      # user id -> (fetched_at, bio)
+_WARNED = set()  # (chat id, user id) with pending bio-link warnings
 
 EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
 LINK_RE = re.compile(
@@ -43,7 +45,7 @@ def has_link(bio):
 
 async def get_bio(ctx, uid):
     hit = _BIO.get(uid)
-    if hit and time.time() - hit[0] < BIO_TTL:
+    if hit and time.time() - hit[0] < (LINK_TTL if has_link(hit[1]) else BIO_TTL):
         return hit[1]
     try:
         bio = (await ctx.bot.get_chat(uid)).bio or ""
@@ -167,6 +169,9 @@ async def biolink_watcher(update, ctx):
     if not cfg or not cfg.get("on") or user.id in cfg.get("allow", []):
         return
     if not has_link(await get_bio(ctx, user.id)):      # cached: cheap after the first message
+        if (chat.id, user.id) in _WARNED:                # link was removed: start fresh
+            _WARNED.discard((chat.id, user.id))
+            db.delete(f"bw:{chat.id}", user.id)
         return
     if await is_admin(chat, user.id, ctx):
         return
@@ -185,12 +190,14 @@ async def biolink_watcher(update, ctx):
     n = (db.get(f"bw:{chat.id}", user.id) or 0) + 1
     if n < cfg["limit"]:
         db.put(f"bw:{chat.id}", user.id, n)
+        _WARNED.add((chat.id, user.id))
         await temp_notice(ctx, chat.id, f"⚠️ {who}, you have a link / @username in your bio. "
                                         f"<b>Warning {n}/{cfg['limit']}</b>\nRemove it from your bio, otherwise you will be "
                                         f"{'muted' if cfg['action'] == 'mute' else 'banned'}.", 20,
                           reply_markup=_buttons())
         return True
     db.delete(f"bw:{chat.id}", user.id)
+    _WARNED.discard((chat.id, user.id))
     try:
         if cfg["action"] == "ban":
             await ctx.bot.ban_chat_member(chat.id, user.id)
