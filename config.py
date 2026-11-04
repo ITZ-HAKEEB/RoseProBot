@@ -20,3 +20,7 @@ NSFW_THRESHOLD = float(os.environ.get("NSFW_THRESHOLD", "0.6") or 0.6)
 # Photo for the join-request DM: an image URL or a Telegram file_id. Empty = use the bot's own profile picture.
 JOIN_PHOTO = os.environ.get("JOIN_PHOTO", "https://anya-file-host.vercel.app/qc4i7ivins")
 
+# Small line at the bottom of the bio-link / NSFW cards, linked to UPDATES_URL: "✦ Updates ✦"
+FOOTER_TEXT = os.environ.get("FOOTER_TEXT", "Updates")
+
+
