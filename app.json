@@ -1,0 +1,60 @@
+{
+  "name": "Lisa Group Manager Bot",
+  "description": "LisaProBot-style Telegram group management bot: federations, filters, locks, notes, reports, warns, welcome, bio-link and NSFW filters.",
+  "keywords": [
+    "telegram",
+    "group-management",
+    "bot",
+    "python"
+  ],
+  "stack": "heroku-24",
+  "buildpacks": [
+    {
+      "url": "heroku/python"
+    }
+  ],
+  "env": {
+    "BOT_TOKEN": {
+      "description": "Bot token from @BotFather",
+      "required": true
+    },
+    "OWNER_ID": {
+      "description": "Your Telegram numeric user id (get it from @userinfobot)",
+      "required": true
+    },
+    "SUPPORT_URL": {
+      "description": "Support group link for the /start button",
+      "value": "https://t.me/telegram",
+      "required": false
+    },
+    "UPDATES_URL": {
+      "description": "Updates channel link for the /start button",
+      "value": "https://t.me/telegram",
+      "required": false
+    },
+    "SIGHTENGINE_USER": {
+      "description": "Optional: Sightengine API user, enables image scanning for the NSFW filter",
+      "required": false
+    },
+    "SIGHTENGINE_SECRET": {
+      "description": "Optional: Sightengine API secret",
+      "required": false
+    },
+    "NSFW_THRESHOLD": {
+      "description": "Optional: image NSFW score (0-1) above which content is removed",
+      "value": "0.7",
+      "required": false
+    }
+  },
+  "addons": [
+    {
+      "plan": "heroku-postgresql"
+    }
+  ],
+  "formation": {
+    "worker": {
+      "quantity": 1,
+      "size": "basic"
+    }
+  }
+}
