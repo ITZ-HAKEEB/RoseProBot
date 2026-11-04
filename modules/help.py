@@ -4,11 +4,11 @@ from telegram.constants import ChatType
 
 import db
 from config import SUPPORT_URL, UPDATES_URL
-from core import HELP, build_message, callback, command, mention, reply
+from core import HELP, build_message, callback, command, esc, mention, reply, send_log
 
 # Order of the buttons in /help; sections that are not listed here are appended at the end.
 HELP_ORDER = ["federation", "filters", "locks", "notes", "reports", "user", "welcome", "moderation",
-              "biolink", "nsfw"]
+              "biolink", "nsfw", "owner"]
 LABELS = {"nsfw": "NSFW", "biolink": "BioLink"}
 HELP_HEADER = "<b>Help</b>\n\nAll commands can be used with the following: / !"
 
@@ -59,6 +59,12 @@ async def cmd_start(update, ctx):
     if chat.type != ChatType.PRIVATE:
         return await reply(update, "I'm alive! Use /help in private to see what I can do.")
     payload = ctx.args[0] if ctx.args else ""
+    # Logger: every /start in private is reported, as many times as the user presses it
+    uname = f"@{esc(user.username)}" if user.username else "—"
+    await send_log(ctx.bot, f"👤 <b>User started the bot</b>\n"
+                            f"Name: {mention(user.id, user.full_name)}\n"
+                            f"Username: {uname}\n"
+                            f"ID: <code>{user.id}</code>" + (f"\nPayload: <code>{esc(payload)}</code>" if payload else ""))
     if payload == "help":
         return await reply(update, HELP_HEADER, reply_markup=help_markup())
     if payload.startswith("rules_"):
