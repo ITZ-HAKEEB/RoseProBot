@@ -163,6 +163,13 @@ async def resolve_user(update, ctx, args):
 CUSTOM_EMOJI_MD = re.compile(r"!\[([^\]\n]+)\]\(emoji:(\d+)\)")
 
 
+def sbtn(text, style=None, **kw):
+    """Inline button with an optional colour: primary (blue), success (green) or danger (red)."""
+    if style:
+        kw["api_kwargs"] = {"style": style}
+    return Btn(text, **kw)
+
+
 def md_to_html(text):
     t = esc(text)
     t = CUSTOM_EMOJI_MD.sub(r'<tg-emoji emoji-id="\2">\1</tg-emoji>', t)
