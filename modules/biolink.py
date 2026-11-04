@@ -219,7 +219,7 @@ async def biolink_watcher(update, ctx):
             result = "⚠️ I need the right to delete messages and restrict / ban members."
     link = bio_match(bio)
     await send_cards(ctx, chat, user, "bio", bio_card(user, link, n, result), protect_card(user, "bio", link, strike),
-                     muted=muted, lasting=reached)
+                     muted=muted)
     return True
 
 
