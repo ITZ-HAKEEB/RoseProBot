@@ -3,11 +3,11 @@ placeholders and coloured inline buttons. /markdownhelp shows the full guide."""
 import html
 import re
 
-from telegram.error import BadRequest
+from telegram.error import TelegramError
 
 import db
 from core import (COMMANDS, command, esc, fill_for, is_admin, join_hook, left_hook, log, md_from_entities, parse_buttons,
-                  build_message, register_help, reply, target)
+                  build_message, visible_len, CUSTOM_EMOJI_MD, register_help, reply, target)
 
 register_help("welcome", [
     ("markdownhelp", "How to format welcome/goodbye messages: markdown, placeholders, buttons, button colours"),
@@ -26,12 +26,16 @@ MAX_TEXT, MAX_CAPTION = 1000, 1024
 MD_HELP = (
     "<b>Custom welcome / goodbye messages</b>\n\n"
     "<b>Set it</b>\n"
-    "/setwelcome your text — or reply to a photo, video, GIF, sticker, voice or document with /setwelcome "
+    "/setwelcome your text — or send/reply to a photo, video, GIF, sticker, voice or document with /setwelcome "
     "(add text after the command, or use the media's own caption). Same for /setgoodbye.\n"
     "/welcome shows a live preview · /welcome off disables · /resetwelcome restores the default.\n\n"
     "<b>Formatting</b>\n"
     "<code>*bold*</code> <code>_italic_</code> <code>__underline__</code> <code>~strike~</code> "
     "<code>||spoiler||</code> <code>`code`</code> <code>[text](https://example.com)</code>\n\n"
+    "<b>Premium emoji</b>\n"
+    "Just type them in your /setwelcome text (or in the media's caption) — they are kept. "
+    "Premium emoji only show up if the bot owner has bought extra usernames for the bot on Fragment; "
+    "otherwise Telegram shows the normal emoji instead.\n\n"
     "<b>Placeholders</b>\n"
     "<code>{first} {last} {fullname} {mention} {username} {id} {chatname}</code>\n\n"
     "<b>Inline buttons</b> (own line each)\n"
@@ -92,8 +96,8 @@ async def send_greeting(bot, chat_id, cfg, default_text, user, chat, count=None)
     has_text = bool(parse_buttons(raw, True)[0])
     txt, kb = build_message(raw, fill_for(user, chat, count), link_lines=True)
 
-    async def deliver(txt, **fmt):
-        if not media:
+    async def deliver(txt, with_media=True, **fmt):
+        if not (media and with_media):
             return await bot.send_message(chat_id, txt, reply_markup=kb, **fmt)
         kind, fid = media["type"], media["file_id"]
         if kind == "sticker":
@@ -105,11 +109,16 @@ async def send_greeting(bot, chat_id, cfg, default_text, user, chat, count=None)
                 "voice": bot.send_voice, "document": bot.send_document}[kind]
         return await send(chat_id, fid, caption=txt if has_text else None, reply_markup=kb, **fmt)
 
-    try:
-        await deliver(txt)
-    except BadRequest as e:              # e.g. badly nested formatting: fall back to plain text
-        log.warning("greeting formatting rejected (%s), sending plain text", e)
-        await deliver(_plain(txt), parse_mode=None)
+    plain = _plain(txt)                  # no tags: also drops <tg-emoji> (premium emoji) and bad nesting
+    attempts = [(txt, True, {}), (plain, True, {"parse_mode": None})]
+    if media and has_text:               # media itself rejected (old file_id, too long caption...): text only
+        attempts.append((plain, False, {"parse_mode": None}))
+    for i, (t, with_media, fmt) in enumerate(attempts):
+        try:
+            return await deliver(t, with_media, **fmt)
+        except TelegramError as e:
+            log.warning("greeting attempt %d/%d failed in %s: %s", i + 1, len(attempts), chat_id, e)
+    log.error("greeting could not be sent to %s", chat_id)
 
 
 # ───────────────────────── commands ─────────────────────────
@@ -135,11 +144,13 @@ def _greeting_cmds(kind, default_on, default_text):
             return
         msg = update.effective_message
         rep = msg.reply_to_message
-        full = md_from_entities(msg.text or "", msg.entities)      # Telegram's own hidden links -> [text](url)
+        own = msg.text or msg.caption or ""                       # video/photo sent with the command as caption
+        full = md_from_entities(own, msg.entities if msg.text else msg.caption_entities)   # hidden links + premium emoji
         parts = full.split(None, 1)
-        txt, media = (parts[1] if len(parts) > 1 else ""), None
-        if rep:
+        txt, media = (parts[1] if len(parts) > 1 else ""), extract_media(msg)
+        if rep and not media:
             media = extract_media(rep)
+        if rep:
             if not txt:                                  # text after the command wins over the caption
                 txt = (md_from_entities(rep.caption, rep.caption_entities) if media
                        else md_from_entities(rep.text or rep.caption, rep.entities or rep.caption_entities)) or ""
@@ -150,9 +161,10 @@ def _greeting_cmds(kind, default_on, default_text):
         clean, rows, err = parse_buttons(txt, True)
         if err:
             return await reply(update, "⚠️ " + esc(err))
+        n_emoji = len(CUSTOM_EMOJI_MD.findall(clean))
         limit = MAX_CAPTION if media and media["type"] != "sticker" else MAX_TEXT
-        if len(clean) > limit:
-            return await reply(update, f"⚠️ Text is too long: {len(clean)} characters, the limit is {limit}"
+        if visible_len(clean) > limit:
+            return await reply(update, f"⚠️ Text is too long: {visible_len(clean)} characters, the limit is {limit}"
                                        f"{' for a caption' if limit == MAX_CAPTION else ' (1024 for a media caption)'}.")
         cfg = db.get(f"c:{chat.id}", kind, {})
         cfg["text"], cfg["media"], cfg["on"] = txt, media, True
@@ -160,6 +172,7 @@ def _greeting_cmds(kind, default_on, default_text):
         what = f" with {media['type']}" if media else ""
         nbtn = sum(len(r) for r in rows)
         what += f", {nbtn} button{'s' if nbtn != 1 else ''}" if nbtn else ""
+        what += f", {n_emoji} premium emoji" if n_emoji else ""
         warn = ""
         if not nbtn and re.search(r"buttonurl", clean, re.I):
             warn = ("\n\n⚠️ No button was created. A button must be on its own line, like:\n"
