@@ -41,8 +41,8 @@ async def on_my_chat_member(update, ctx):
         if chat.type != ChatType.PRIVATE:
             await send_log(ctx.bot, f"➖ <b>Removed from group</b>\n{esc(chat.title)}\nID: <code>{chat.id}</code>\nBy: {mention(ev.from_user.id, ev.from_user.first_name)}")
     elif old in ("left", "kicked") and new in ("member", "administrator"):
-        new_chat = track_chat(chat)
-        if chat.type != ChatType.PRIVATE or new_chat:
+        track_chat(chat)
+        if chat.type != ChatType.PRIVATE:      # private /start is logged by cmd_start, every time
             await log_new_chat(ctx, chat, ev.from_user)
 
 
@@ -86,8 +86,7 @@ async def dispatcher(update, ctx):
     if not fn:
         return
     chat, user = update.effective_chat, update.effective_user
-    if track_chat(chat) and chat.type == ChatType.PRIVATE:
-        await log_new_chat(ctx, chat, user)
+    track_chat(chat)
     if chat.type != ChatType.PRIVATE and name in db.get(f"c:{chat.id}", "disabled", []):
         if not await is_admin(chat, user.id, ctx):
             return
