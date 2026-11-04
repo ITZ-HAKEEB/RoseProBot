@@ -15,3 +15,7 @@ LOG_CHANNEL = int(os.environ.get("LOG_CHANNEL_ID", "-1003979103138") or 0)
 SIGHTENGINE_USER = os.environ.get("SIGHTENGINE_USER", "")
 SIGHTENGINE_SECRET = os.environ.get("SIGHTENGINE_SECRET", "")
 NSFW_THRESHOLD = float(os.environ.get("NSFW_THRESHOLD", "0.7") or 0.7)
+
+# Photo for the join-request DM: an image URL or a Telegram file_id. Empty = use the bot's own profile picture.
+JOIN_PHOTO = os.environ.get("JOIN_PHOTO", "https://anya-file-host.vercel.app/qc4i7ivins")
+
