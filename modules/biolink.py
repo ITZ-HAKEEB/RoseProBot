@@ -15,6 +15,7 @@ import db
 from config import SUPPORT_URL, UPDATES_URL
 from core import (callback, command, cooldown_ok, esc, is_admin, log, mention, register_help, reply, resolve_user,
                   target, temp_notice, watcher)
+from modules.guard import bio_card, protect_card, send_cards
 
 ACTIONS = ("mute", "ban", "delete")
 
@@ -30,7 +31,6 @@ register_help("biolink", [
 BIO_TTL = 600   # seconds a clean bio is cached
 LINK_TTL = 10   # a bio WITH a link is re-checked this often, so removing the link works almost at once
 _BIO = {}      # user id -> (fetched_at, bio)
-_WARNED = set()  # (chat id, user id) with pending bio-link warnings
 
 EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
 LINK_RE = re.compile(
@@ -41,6 +41,16 @@ LINK_RE = re.compile(
 
 def has_link(bio):
     return bool(LINK_RE.search(EMAIL_RE.sub(" ", bio or "")))
+
+
+def bio_match(bio):
+    """The link / @username found in a bio, as the user wrote it (for the detection card)."""
+    clean = EMAIL_RE.sub(" ", bio or "")
+    m = LINK_RE.search(clean)
+    if not m:
+        return ""
+    tok = re.match(r"\S+", clean[m.start():])
+    return (tok.group(0) if tok else m.group(0)).rstrip(".,;:!?)")[:100]
 
 
 async def get_bio(ctx, uid):
@@ -168,9 +178,9 @@ async def biolink_watcher(update, ctx):
     cfg = db.get(f"c:{chat.id}", "biolink")
     if not cfg or not cfg.get("on") or user.id in cfg.get("allow", []):
         return
-    if not has_link(await get_bio(ctx, user.id)):      # cached: cheap after the first message
-        if (chat.id, user.id) in _WARNED:                # link was removed: start fresh
-            _WARNED.discard((chat.id, user.id))
+    bio = await get_bio(ctx, user.id)                     # cached: cheap after the first message
+    if not has_link(bio):
+        if db.get(f"bw:{chat.id}", user.id) is not None:   # link was removed: start fresh (counter lives in the DB)
             db.delete(f"bw:{chat.id}", user.id)
         return
     if await is_admin(chat, user.id, ctx):
@@ -182,36 +192,34 @@ async def biolink_watcher(update, ctx):
     if not cooldown_ok((chat.id, user.id, "biolink"), 10):  # a burst of messages counts as one warning
         return True
     cfg = get_cfg(chat.id)
-    who = mention(user.id, user.first_name)
-    if cfg["action"] == "delete":
-        await temp_notice(ctx, chat.id, f"🔗 {who}, links and @usernames in your bio aren't allowed here. "
-                                        "Remove it to chat.", 15, reply_markup=_buttons())
-        return True
+    action, limit = cfg["action"], cfg["limit"]
     n = (db.get(f"bw:{chat.id}", user.id) or 0) + 1
-    if n < cfg["limit"]:
+    reached = action != "delete" and n >= limit
+    muted = False
+    if action == "delete":
         db.put(f"bw:{chat.id}", user.id, n)
-        _WARNED.add((chat.id, user.id))
-        await temp_notice(ctx, chat.id, f"⚠️ {who}, you have a link / @username in your bio. "
-                                        f"<b>Warning {n}/{cfg['limit']}</b>\nRemove it from your bio, otherwise you will be "
-                                        f"{'muted' if cfg['action'] == 'mute' else 'banned'}.", 20,
-                          reply_markup=_buttons())
-        return True
-    db.delete(f"bw:{chat.id}", user.id)
-    _WARNED.discard((chat.id, user.id))
-    try:
-        if cfg["action"] == "ban":
-            await ctx.bot.ban_chat_member(chat.id, user.id)
-            await ctx.bot.send_message(chat.id, f"🚫 {who} reached {n}/{cfg['limit']} warnings (link in bio) and was banned.",
-                                       reply_markup=_buttons())
-        else:
-            await ctx.bot.restrict_chat_member(chat.id, user.id, ChatPermissions(can_send_messages=False))
-            await ctx.bot.send_message(
-                chat.id, f"🔇 {who} reached {n}/{cfg['limit']} warnings (link in bio) and was muted.\n"
-                         "Remove the link from your bio and tap the button to get unmuted.",
-                reply_markup=_buttons(Btn("✅ I removed it", callback_data=f"bio:{chat.id}:{user.id}")))
-    except Exception:
-        log.exception("biolink action failed in %s", chat.id)
-        await temp_notice(ctx, chat.id, "⚠️ I need the right to delete messages and restrict / ban members.")
+        result, strike = "✅ <b>Only the message was removed.</b>", str(n)
+    elif not reached:
+        db.put(f"bw:{chat.id}", user.id, n)
+        result = (f"⚠️ <b>Warning {n}/{limit}</b> — you will be "
+                  f"{'muted' if action == 'mute' else 'banned'} at {limit}/{limit}!")
+        strike = f"{n}/{limit}"
+    else:
+        db.delete(f"bw:{chat.id}", user.id)
+        strike = f"{n}/{limit}"
+        try:
+            if action == "ban":
+                await ctx.bot.ban_chat_member(chat.id, user.id)
+                result = "🚫 <b>User Has Been Banned!</b>"
+            else:
+                await ctx.bot.restrict_chat_member(chat.id, user.id, ChatPermissions(can_send_messages=False))
+                result, muted = "🔇 <b>User Has Been Muted!</b>", True
+        except Exception:
+            log.exception("biolink action failed in %s", chat.id)
+            result = "⚠️ I need the right to delete messages and restrict / ban members."
+    link = bio_match(bio)
+    await send_cards(ctx, chat, user, "bio", bio_card(user, link, n, result), protect_card(user, "bio", link, strike),
+                     muted=muted, lasting=reached)
     return True
 
 
