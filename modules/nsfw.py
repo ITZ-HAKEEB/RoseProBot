@@ -8,7 +8,7 @@ Two layers:
      the preview frame is checked. If the `nudenet` package is missing the image layer is simply off.
      (Optional: if you set SIGHTENGINE_USER / SIGHTENGINE_SECRET and NudeNet is not installed, Sightengine is used.)
 
-Admins are never touched. The bot needs the "delete messages" right (and "restrict members" for mute / ban).
+Admin text is never touched (so admin commands keep working), but NSFW pictures / stickers of admins are deleted too (no warn / mute / ban for admins). The bot needs the "delete messages" right (and "restrict members" for mute / ban).
 """
 import asyncio
 import importlib.util
@@ -32,6 +32,8 @@ from modules.warns import ACTIONS, apply_action
 register_help("nsfw", [
     ("nsfw", "Show or toggle the NSFW filter: /nsfw on|off. Removes adult keywords and (if configured) adult images"),
     ("nsfwaction", "Choose what happens to the sender: /nsfwaction delete|warn|mute|ban"),
+    ("nsfwlevel", "How strict the image check is: /nsfwlevel strict|normal. Strict also removes partly nude / swimwear / lingerie pictures"),
+    ("nsfwtest", "Admins: reply to a photo / sticker with /nsfwtest to see what the scanner finds in it"),
     ("nsfwlist", "Show the custom words blocked in this chat"),
     ("addnsfw", "Block an extra word or phrase: /addnsfw &lt;word&gt;"),
     ("rmnsfw", "Stop blocking a custom word: /rmnsfw &lt;word&gt;"),
@@ -50,7 +52,7 @@ DEFAULT_WORDS = (
 
 
 def get_cfg(chat_id):
-    return {"on": False, "action": "delete", "words": [], **db.get(f"c:{chat_id}", "nsfw", {})}
+    return {"on": False, "action": "delete", "words": [], "level": "strict", **db.get(f"c:{chat_id}", "nsfw", {})}
 
 
 def save_cfg(chat_id, cfg):
@@ -128,6 +130,28 @@ def adult_score(detections):
     return max((float(d.get("score", 0) or 0) for d in detections if _label_is_adult(d.get("class", ""))), default=0.0)
 
 
+# Parts that are covered but suggest swimwear / lingerie: a picture showing 3 of these 4 together is "revealing".
+REVEALING = ("FEMALE_BREAST_COVERED", "FEMALE_GENITALIA_COVERED", "BUTTOCKS_COVERED", "BELLY_EXPOSED")
+STRICT_EXPOSED = min(0.3, NSFW_THRESHOLD)
+
+
+def make_info(detections):
+    exposed = adult_score(detections)
+    best = {}
+    for d in detections:
+        c = str(d.get("class", "")).upper()
+        best[c] = max(best.get(c, 0.0), float(d.get("score", 0) or 0))
+    revealing = sum(1 for k in REVEALING if best.get(k, 0) >= 0.4) >= 3
+    seen = sorted(((round(v, 2), k) for k, v in best.items() if v >= 0.2), reverse=True)
+    return {"exposed": exposed, "revealing": revealing, "seen": seen}
+
+
+def is_adult(info, level="strict"):
+    if level == "strict":
+        return info["exposed"] >= STRICT_EXPOSED or info["revealing"]
+    return info["exposed"] >= NSFW_THRESHOLD
+
+
 def _scan_local_sync(data):
     det = _load_detector()
     if det is None:
@@ -145,7 +169,7 @@ def _scan_local_sync(data):
     os.close(fd)
     try:
         img.save(path, "JPEG", quality=92)
-        return adult_score(det.detect(path))
+        return make_info(det.detect(path))
     finally:
         try:
             os.unlink(path)
@@ -169,11 +193,12 @@ async def _scan_sightengine(data):
         log.warning("nsfw scan error: %s", j.get("error") or j)
         return None
     n = j.get("nudity", {})
-    return max(float(n.get(k, 0) or 0) for k in ("sexual_activity", "sexual_display", "erotica"))
+    return {"exposed": max(float(n.get(k, 0) or 0) for k in ("sexual_activity", "sexual_display", "erotica")),
+            "revealing": False, "seen": []}
 
 
 async def scan_image(data):
-    """0..1 'adult content' score for image bytes, or None if the scan was not possible."""
+    """{"exposed": 0..1, "revealing": bool, "seen": [...]} for image bytes, or None if the scan was not possible."""
     if LOCAL_SCAN:
         try:
             score = await asyncio.to_thread(_scan_local_sync, data)
@@ -187,16 +212,53 @@ async def scan_image(data):
     return None
 
 
-async def media_score(ref):
+async def media_info(ref):
     if ref.file_unique_id in _SCANNED:
         return _SCANNED[ref.file_unique_id]
     f = await ref.get_file()
-    score = await scan_image(bytes(await f.download_as_bytearray()))
-    if score is not None:
+    info = await scan_image(bytes(await f.download_as_bytearray()))
+    if info is not None:
         if len(_SCANNED) > 2000:
             _SCANNED.clear()
-        _SCANNED[ref.file_unique_id] = score
-    return score
+        _SCANNED[ref.file_unique_id] = info
+    return info
+
+
+async def preload():
+    """Load the model at startup so a problem shows up in the start message instead of failing silently."""
+    if LOCAL_SCAN:
+        det = await asyncio.to_thread(_load_detector)
+        return "✅ local NudeNet loaded" if det else f"❌ NudeNet failed: {_DET_ERR}"
+    return "✅ Sightengine API" if API_SCAN else "❌ off (nudenet not installed)"
+
+
+def model_state():
+    if LOCAL_SCAN:
+        return "on (local, no API)" if _DET_ERR is None else f"BROKEN: {_DET_ERR}"
+    return "on (Sightengine)" if API_SCAN else "off (nudenet is not installed)"
+
+
+# ───────────────────────── sticker packs ─────────────────────────
+_PACKS = {}
+_PACK_RE = re.compile(r"(?<![a-z0-9])(nsfw|porn|porno|hentai|sex|nude|nudes|naked|xxx|lewd|ecchi|boobs|adult)(?![a-z0-9])", re.I)
+
+
+async def sticker_pack_hit(ctx, st, custom_words):
+    """A sticker from a pack whose name / title says it is adult is removed without even looking at the picture."""
+    name = st.set_name
+    if not name:
+        return False
+    if name not in _PACKS:
+        title = ""
+        try:
+            title = (await ctx.bot.get_sticker_set(name)).title or ""
+        except Exception:
+            pass
+        if len(_PACKS) > 2000:
+            _PACKS.clear()
+        _PACKS[name] = f"{name} {title}".replace("_", " ")
+    t = _PACKS[name]
+    return bool(_PACK_RE.search(t)) or text_hit(t, custom_words)
 
 
 # ───────────────────────── commands ─────────────────────────
@@ -214,8 +276,8 @@ async def cmd_nsfw(update, ctx):
         return await reply(update, f"NSFW filter turned {'on' if cfg['on'] else 'off'}.")
     await reply(update, f"<b>NSFW filter</b> in {esc(chat.title)}: <b>{'on' if cfg['on'] else 'off'}</b>\n"
                         f"Action: {cfg['action']}\nCustom words: {len(cfg['words'])}\n"
-                        f"Image scanning: {'on (local, no API)' if LOCAL_SCAN else 'on (Sightengine)' if API_SCAN else 'off (nudenet is not installed)'}\n\n"
-                        "Change with /nsfw on|off and /nsfwaction delete|warn|mute|ban.")
+                        f"Image scanning: {model_state()}\nStrictness: {cfg['level']}\n\n"
+                        "Change with /nsfw on|off, /nsfwaction delete|warn|mute|ban and /nsfwlevel strict|normal.")
 
 
 @command("nsfwaction")
@@ -229,6 +291,41 @@ async def cmd_nsfwaction(update, ctx):
     cfg["action"] = ctx.args[0].lower()
     save_cfg(chat.id, cfg)
     await reply(update, f"NSFW action set to {cfg['action']}.")
+
+
+@command("nsfwlevel")
+async def cmd_nsfwlevel(update, ctx):
+    chat = await target(update, ctx)
+    if not chat:
+        return
+    if not ctx.args or ctx.args[0].lower() not in ("strict", "normal"):
+        return await reply(update, "Usage: /nsfwlevel strict|normal\n<b>strict</b>: also removes partly nude, swimwear and "
+                                   "lingerie pictures. <b>normal</b>: only clearly nude ones.")
+    cfg = get_cfg(chat.id)
+    cfg["level"] = ctx.args[0].lower()
+    save_cfg(chat.id, cfg)
+    await reply(update, f"NSFW strictness set to {cfg['level']}.")
+
+
+@command("nsfwtest")
+async def cmd_nsfwtest(update, ctx):
+    chat, msg = update.effective_chat, update.effective_message
+    if not await is_admin(chat, update.effective_user.id, ctx):
+        return await reply(update, "Admins only.")
+    rep_msg = msg.reply_to_message
+    ref = media_ref(rep_msg) if rep_msg else None
+    if ref is None:
+        return await reply(update, "Reply to a photo / sticker / GIF / video with /nsfwtest.")
+    if not MEDIA_SCAN:
+        return await reply(update, f"Image scanning: {model_state()}")
+    info = await media_info(ref)
+    if info is None:
+        return await reply(update, f"❌ The scan failed. Image scanning: {model_state()}\nCheck the bot logs.")
+    level = get_cfg(chat.id)["level"]
+    seen = "\n".join(f"• {k}: {v}" for v, k in info["seen"][:10]) or "nothing found"
+    await reply(update, f"<b>Scan result</b> (strictness: {level})\nExposed score: {info['exposed']:.2f}\n"
+                        f"Revealing (swimwear/lingerie): {'yes' if info['revealing'] else 'no'}\n"
+                        f"Would be removed: <b>{'YES' if is_adult(info, level) else 'no'}</b>\n\n{seen}")
 
 
 @command("nsfwlist")
@@ -284,25 +381,40 @@ async def nsfw_watcher(update, ctx):
     cfg = db.get(f"c:{chat.id}", "nsfw")
     if not cfg or not cfg.get("on"):
         return
+    words, level = cfg.get("words", []), cfg.get("level", "strict")
     text = msg.text or msg.caption or ""
-    hit = bool(text) and text_hit(text, cfg.get("words", []))
-    ref = None if hit or not MEDIA_SCAN else media_ref(msg)
-    if not hit and ref is None:
+    hit = bool(text) and text_hit(text, words)
+    ref = media_ref(msg) if MEDIA_SCAN else None
+    pack = bool(msg.sticker) and await sticker_pack_hit(ctx, msg.sticker, words)
+    if not (hit or pack) and ref is None:
         return
-    if await is_admin(chat, user.id, ctx):
-        return
-    if not hit:
+    admin = await is_admin(chat, user.id, ctx)
+    if admin:
+        hit = False                      # admin text / commands are left alone; their pictures and stickers are not
+        if not pack and ref is None:
+            return
+    if not (hit or pack):
         try:
-            score = await media_score(ref)
+            info = await media_info(ref)
         except Exception:
             log.exception("nsfw media check failed")
             return
-        if score is None or score < NSFW_THRESHOLD:
+        if info is None:
+            return
+        verdict = is_adult(info, level)
+        log.info("nsfw scan in %s: exposed=%.2f revealing=%s level=%s -> %s", chat.id, info["exposed"],
+                 info["revealing"], level, "REMOVE" if verdict else "ok")
+        if not verdict:
             return
     try:
         await msg.delete()
     except Exception:
         pass
+    if admin:                            # deleted, but an admin is never warned / muted / banned
+        if cooldown_ok((chat.id, user.id, "nsfw")):
+            await temp_notice(ctx, chat.id, f"🔞 NSFW content of {mention(user.id, user.first_name)} was removed.",
+                              10, reply_markup=_buttons())
+        return True
     if not cooldown_ok((chat.id, user.id, "nsfw")):
         return True
     action = cfg.get("action", "delete")
