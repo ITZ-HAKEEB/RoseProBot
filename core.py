@@ -334,11 +334,34 @@ async def temp_notice(ctx, chat_id, text, seconds=10, **kw):
 START_TIME = time.time()
 
 
-async def send_log(bot, text):
-    """Post a line to the log chat (LOG_CHANNEL_ID). Never raises."""
+async def user_photo(bot, uid):
+    """file_id of a user's (or bot's) current profile photo, or None."""
+    try:
+        r = await bot.get_user_profile_photos(uid, limit=1)
+        return r.photos[0][-1].file_id if r.total_count else None
+    except Exception:
+        return None
+
+
+async def chat_photo(bot, chat_id):
+    """file_id of a group's photo, or None."""
+    try:
+        c = await bot.get_chat(chat_id)
+        return c.photo.big_file_id if c.photo else None
+    except Exception:
+        return None
+
+
+async def send_log(bot, text, photo=None):
+    """Post to the log chat (LOG_CHANNEL_ID), with a photo when given. Never raises."""
     if not LOG_CHANNEL:
         return
     try:
+        if photo:
+            try:
+                return await bot.send_photo(LOG_CHANNEL, photo, caption=text[:1024])
+            except Exception as e:
+                log.warning("log photo failed, sending text only: %s", e)
         await bot.send_message(LOG_CHANNEL, text)
     except Exception as e:
         log.warning("could not write to log chat %s: %s", LOG_CHANNEL, e)
