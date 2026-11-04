@@ -15,7 +15,7 @@ from telegram import InlineKeyboardButton as Btn, InlineKeyboardMarkup as Markup
 from telegram.constants import ChatType
 
 import db
-from config import SUDO
+from config import LOG_CHANNEL, SUDO
 
 log = logging.getLogger("lisa")
 
@@ -328,3 +328,40 @@ async def temp_notice(ctx, chat_id, text, seconds=10, **kw):
     task = asyncio.get_running_loop().create_task(_remove())
     _BG_TASKS.add(task)
     task.add_done_callback(_BG_TASKS.discard)
+
+
+# ───────────────────────── logger ─────────────────────────
+START_TIME = time.time()
+
+
+async def send_log(bot, text):
+    """Post a line to the log chat (LOG_CHANNEL_ID). Never raises."""
+    if not LOG_CHANNEL:
+        return
+    try:
+        await bot.send_message(LOG_CHANNEL, text)
+    except Exception as e:
+        log.warning("could not write to log chat %s: %s", LOG_CHANNEL, e)
+
+
+def fmt_uptime(seconds):
+    d, r = divmod(int(seconds), 86400)
+    h, r = divmod(r, 3600)
+    m, s = divmod(r, 60)
+    return " ".join(x for x in (f"{d}d" if d else "", f"{h}h" if h else "", f"{m}m" if m else "", f"{s}s") if x)
+
+
+# ───────────────────────── known chats (broadcast targets) ─────────────────────────
+_SEEN = set()
+
+
+def track_chat(chat):
+    """Remember every chat the bot talks in: private users go to bc_users, groups to bc_chats."""
+    if chat.id in _SEEN:
+        return False
+    _SEEN.add(chat.id)
+    scope = "bc_users" if chat.type == ChatType.PRIVATE else "bc_chats"
+    if db.get(scope, chat.id) is None:
+        db.put(scope, chat.id, chat.title or chat.full_name or "")
+        return True      # first time we see it
+    return False
