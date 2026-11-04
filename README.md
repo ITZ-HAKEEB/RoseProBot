@@ -2,7 +2,7 @@
 
 LisaProBot-style Telegram group management bot (Python, python-telegram-bot 21).
 
-[![Deploy](https://www.herokucdn.com/deploy/button.svg)](https://heroku.com/deploy?template=https://github.com/YOUR_GITHUB_USERNAME/YOUR_REPO_NAME)
+[![Deploy](https://www.herokucdn.com/deploy/button.svg)](https://heroku.com/deploy?template=https://github.com/TEAM-KRITI/lisha)
 
 > Deploy button kaam karne ke liye: is folder ko apne GitHub repo me push karo (public repo), phir upar link me
 > `YOUR_GITHUB_USERNAME/YOUR_REPO_NAME` apne repo se replace karo.
