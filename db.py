@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import time
+import types
 
 _log = logging.getLogger("lisa.db")
 
@@ -32,6 +33,8 @@ if _mongo_url:
                          "Add the line  pymongo[srv]>=4.8,<5  to requirements.txt, push it, and redeploy.\n")
 
     kind = "MongoDB"
+    # Compatibility shim: an older bot.py reads db.engine.dialect.name, so give it something harmless to read.
+    engine = types.SimpleNamespace(dialect=types.SimpleNamespace(name="mongodb"))
     _client = MongoClient(_mongo_url, serverSelectionTimeoutMS=15000, retryWrites=True, retryReads=True)
     try:
         _dbname = _client.get_default_database().name      # database named in the URL (.../mydb?...)
