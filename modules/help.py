@@ -76,8 +76,21 @@ async def cmd_start(update, ctx):
             return await reply(update, "This chat has no rules set yet.")
         txt, kb = build_message(rules)
         return await reply(update, "<b>Rules</b>\n\n" + txt, reply_markup=kb)
-    text = (f"Hi {mention(user.id, user.first_name)}!\nI'm a group management bot: moderation, warnings, "
-            "notes, locks, welcome messages and more.\n\nAdd me to your group as an admin to get started.")
+    text = (f"👋 <b>Hey {mention(user.id, user.first_name)}!</b>\n\n"
+            f"✨ I'm <b>{esc(ctx.bot.first_name or 'Lisa')}</b>, a powerful group management bot that keeps your "
+            "chats clean, safe and organised, 24/7.\n"
+            "━━━━━━━━━━━━━━━━━━\n\n"
+            "<blockquote>🛡 <b>Moderation</b>: ban, mute, kick and warn\n"
+            "🔒 <b>Locks &amp; Filters</b>: 24 lock types and keyword filters\n"
+            "🔗 <b>BioLink</b>: stops users who have a link in their bio\n"
+            "🔞 <b>NSFW</b>: removes adult text, images and stickers\n"
+            "👋 <b>Welcome</b>: text or media messages with buttons\n"
+            "📝 <b>Notes &amp; Rules</b>: save them once, share them anytime\n"
+            "🌐 <b>Federations</b>: ban a user in many groups at once\n"
+            "🚨 <b>Reports</b>: members can call the admins with @admin</blockquote>\n\n"
+            "➕ <b>Add me to your group as an admin</b> and give me the <i>Delete messages</i> and "
+            "<i>Restrict members</i> rights to get started.\n\n"
+            "Tap <b>Help</b> below to see every command 👇")
     kb = Markup([
         [sbtn("Add me to a group", "primary", url=f"https://t.me/{ctx.bot.username}?startgroup=true&admin=delete_messages+restrict_members+pin_messages+invite_users")],
         [sbtn("support", "success", url=SUPPORT_URL), sbtn("updates", "success", url=UPDATES_URL)],
