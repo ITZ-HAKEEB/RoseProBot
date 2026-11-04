@@ -24,8 +24,12 @@ engine = None    # SQLAlchemy engine (only for Postgres / SQLite)
 
 if _mongo_url:
     # ----------------------------------------------------------------------------------------- MongoDB
-    from pymongo import MongoClient, ASCENDING
-    from pymongo.errors import AutoReconnect, NetworkTimeout, ServerSelectionTimeoutError
+    try:
+        from pymongo import MongoClient, ASCENDING
+        from pymongo.errors import AutoReconnect, NetworkTimeout, ServerSelectionTimeoutError
+    except ImportError:
+        raise SystemExit("\n*** pymongo is not installed ***\nMONGO_URL is set but requirements.txt on this deploy has no pymongo.\n"
+                         "Add the line  pymongo[srv]>=4.8,<5  to requirements.txt, push it, and redeploy.\n")
 
     kind = "MongoDB"
     _client = MongoClient(_mongo_url, serverSelectionTimeoutMS=15000, retryWrites=True, retryReads=True)
