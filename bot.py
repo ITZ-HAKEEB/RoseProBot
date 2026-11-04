@@ -1,6 +1,9 @@
 """Entry point. Features live in modules/, shared plumbing in core.py, settings in config.py."""
 import logging
+import platform
 import re
+
+import telegram
 
 from telegram import LinkPreviewOptions, Update
 from telegram.constants import ChatType
@@ -18,11 +21,13 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname
 CMD_RE = re.compile(r"^([/!])(\w+)(?:@(\w+))?(?:\s|$)")
 
 
-async def log_new_chat(ctx, chat, user):
+async def log_new_chat(ctx, chat, user, ev_from=None):
+    ev_from = ev_from or user
     if chat.type == ChatType.PRIVATE:
         await send_log(ctx.bot, f"👤 <b>New user</b>\n{mention(user.id, user.first_name)}\nID: <code>{user.id}</code>")
     else:
-        await send_log(ctx.bot, f"➕ <b>New group</b>\n{esc(chat.title)}\nID: <code>{chat.id}</code>")
+        by = ev_from
+        await send_log(ctx.bot, f"➕ <b>New group</b>\n{esc(chat.title)}\nID: <code>{chat.id}</code>\nAdded by: {mention(by.id, by.first_name)} (<code>{by.id}</code>)")
 
 
 async def on_my_chat_member(update, ctx):
@@ -36,16 +41,37 @@ async def on_my_chat_member(update, ctx):
         if chat.type != ChatType.PRIVATE:
             await send_log(ctx.bot, f"➖ <b>Removed from group</b>\n{esc(chat.title)}\nID: <code>{chat.id}</code>\nBy: {mention(ev.from_user.id, ev.from_user.first_name)}")
     elif old in ("left", "kicked") and new in ("member", "administrator"):
-        if track_chat(chat):
+        new_chat = track_chat(chat)
+        if chat.type != ChatType.PRIVATE or new_chat:
             await log_new_chat(ctx, chat, ev.from_user)
 
 
 async def post_init(app):
-    """Runs on every start: tells the log chat the bot is up (one message per start)."""
+    """Runs exactly once per process start: one detailed message in the log chat."""
     me = await app.bot.get_me()
     log.info("Logged in as @%s", me.username)
-    await send_log(app.bot, f"✅ <b>Bot started</b>\n@{esc(me.username)}\n🕒 {fmt_time(now())}\n"
-                            f"⚙️ {len(COMMANDS)} commands, {len(core.WATCHERS)} watchers")
+    n = (db.get("meta", "starts", 0) or 0) + 1
+    db.put("meta", "starts", n)
+    users, groups = len(db.scope_keys("bc_users")), len(db.scope_keys("bc_chats"))
+    db_kind = "PostgreSQL" if db.engine.dialect.name.startswith("postgres") else "SQLite"
+    await send_log(app.bot,
+        "✅ <b>BOT STARTED</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"🤖 <b>Bot:</b> {esc(me.full_name)} (@{esc(me.username)})\n"
+        f"🆔 <b>Bot ID:</b> <code>{me.id}</code>\n"
+        f"🔢 <b>Start count:</b> #{n}\n"
+        f"🕒 <b>Time:</b> {fmt_time(now())}\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"⚙️ <b>Commands:</b> {len(COMMANDS)}\n"
+        f"👀 <b>Watchers:</b> {len(core.WATCHERS)}\n"
+        f"👤 <b>Users:</b> {users}\n"
+        f"👥 <b>Groups:</b> {groups}\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"🗄 <b>Database:</b> {db_kind}\n"
+        f"🐍 <b>Python:</b> {platform.python_version()}\n"
+        f"📦 <b>PTB:</b> {telegram.__version__}\n"
+        f"💻 <b>Host:</b> {esc(platform.system())} {esc(platform.machine())}\n"
+        "🟢 <b>Status:</b> Online and ready")
 
 
 async def dispatcher(update, ctx):
@@ -60,7 +86,7 @@ async def dispatcher(update, ctx):
     if not fn:
         return
     chat, user = update.effective_chat, update.effective_user
-    if track_chat(chat):
+    if track_chat(chat) and chat.type == ChatType.PRIVATE:
         await log_new_chat(ctx, chat, user)
     if chat.type != ChatType.PRIVATE and name in db.get(f"c:{chat.id}", "disabled", []):
         if not await is_admin(chat, user.id, ctx):
@@ -81,8 +107,7 @@ async def watcher(update, ctx):
     msg, user = update.effective_message, update.effective_user
     if not msg or not user or user.is_bot:
         return
-    if track_chat(update.effective_chat):
-        await log_new_chat(ctx, update.effective_chat, user)
+    track_chat(update.effective_chat)      # groups are logged only when the bot is added (on_my_chat_member)
     for _, fn in core.WATCHERS:
         try:
             if await fn(update, ctx):
