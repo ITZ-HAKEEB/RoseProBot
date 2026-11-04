@@ -6,7 +6,7 @@ import re
 from telegram.error import BadRequest
 
 import db
-from core import (COMMANDS, args_text, command, esc, fill_for, is_admin, join_hook, left_hook, log, parse_buttons,
+from core import (COMMANDS, command, esc, fill_for, is_admin, join_hook, left_hook, log, md_from_entities, parse_buttons,
                   build_message, register_help, reply, target)
 
 register_help("welcome", [
@@ -36,6 +36,7 @@ MD_HELP = (
     "<code>{first} {last} {fullname} {mention} {username} {id} {chatname}</code>\n\n"
     "<b>Inline buttons</b> (own line each)\n"
     "<code>[Rules](buttonurl://https://example.com/rules)</code>\n"
+    "Tip: a line that contains only <code>[Text](https://link)</code> also becomes a button.\n"
     "Add <code>:same</code> at the end of the link to put it on the same row as the previous button:\n"
     "<code>[Chat](buttonurl://https://t.me/mychat:same)</code>\n"
     "Max 8 buttons, 4 per row. Links must be http(s):// or tg://.\n\n"
@@ -88,8 +89,8 @@ async def send_greeting(bot, chat_id, cfg, default_text, user, chat, count=None)
     """Send a welcome/goodbye (text or media + caption + buttons) to chat_id."""
     raw = cfg.get("text", default_text if not cfg.get("media") else "")
     media = cfg.get("media")
-    has_text = bool(parse_buttons(raw)[0])
-    txt, kb = build_message(raw, fill_for(user, chat, count))
+    has_text = bool(parse_buttons(raw, True)[0])
+    txt, kb = build_message(raw, fill_for(user, chat, count), link_lines=True)
 
     async def deliver(txt, **fmt):
         if not media:
@@ -134,16 +135,19 @@ def _greeting_cmds(kind, default_on, default_text):
             return
         msg = update.effective_message
         rep = msg.reply_to_message
-        txt, media = args_text(msg), None
+        full = md_from_entities(msg.text or "", msg.entities)      # Telegram's own hidden links -> [text](url)
+        parts = full.split(None, 1)
+        txt, media = (parts[1] if len(parts) > 1 else ""), None
         if rep:
             media = extract_media(rep)
             if not txt:                                  # text after the command wins over the caption
-                txt = (rep.caption if media else (rep.text or rep.caption)) or ""
+                txt = (md_from_entities(rep.caption, rep.caption_entities) if media
+                       else md_from_entities(rep.text or rep.caption, rep.entities or rep.caption_entities)) or ""
         txt = txt.strip()
         if not txt and not media:
             return await reply(update, f"Usage: /set{kind} &lt;text&gt;, or reply to a photo / video / GIF / sticker / "
                                        "voice / document. See /markdownhelp")
-        clean, _, err = parse_buttons(txt)
+        clean, rows, err = parse_buttons(txt, True)
         if err:
             return await reply(update, "⚠️ " + esc(err))
         limit = MAX_CAPTION if media and media["type"] != "sticker" else MAX_TEXT
@@ -154,8 +158,15 @@ def _greeting_cmds(kind, default_on, default_text):
         cfg["text"], cfg["media"], cfg["on"] = txt, media, True
         db.put(f"c:{chat.id}", kind, cfg)
         what = f" with {media['type']}" if media else ""
+        nbtn = sum(len(r) for r in rows)
+        what += f", {nbtn} button{'s' if nbtn != 1 else ''}" if nbtn else ""
+        warn = ""
+        if not nbtn and re.search(r"buttonurl", clean, re.I):
+            warn = ("\n\n⚠️ No button was created. A button must be on its own line, like:\n"
+                    "<code>[Rules](buttonurl://https://example.com/rules)</code>\n"
+                    "I received this text:\n<code>" + esc(txt[:600]) + "</code>")
         extra = " The text is sent right after the sticker." if media and media["type"] == "sticker" and txt else ""
-        await reply(update, f"{kind.title()} message saved{what}.{extra} Check it with /{kind}.")
+        await reply(update, f"{kind.title()} message saved{what}.{extra} Check it with /{kind}.{warn}")
 
     async def resetter(update, ctx):
         chat = await target(update, ctx)
