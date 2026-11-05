@@ -4,6 +4,9 @@ import os
 TOKEN = os.environ["BOT_TOKEN"]
 OWNER_ID = int(os.environ.get("OWNER_ID", "0") or 0)
 SUPPORT_URL = os.environ.get("SUPPORT_URL", "https://t.me/kirti_bots_support")
+
+# "Owner" button on /start: a t.me link. Empty = opens a chat with OWNER_ID.
+OWNER_URL = os.environ.get("OWNER_URL", "").strip() or (f"tg://user?id={OWNER_ID}" if OWNER_ID else "8957532324")
 UPDATES_URL = os.environ.get("UPDATES_URL", "https://t.me/kirti_bots")
 SUDO = {OWNER_ID} if OWNER_ID else set()
 
