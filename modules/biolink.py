@@ -8,12 +8,12 @@ The bot needs the "delete messages" right (and "restrict members" for mute / ban
 import re
 import time
 
-from telegram import ChatPermissions, InlineKeyboardButton as Btn, InlineKeyboardMarkup as Markup
+from telegram import ChatPermissions, InlineKeyboardMarkup as Markup
 from telegram.constants import ChatType
 
 import db
 from config import SUPPORT_URL, UPDATES_URL
-from core import (callback, command, cooldown_ok, esc, is_admin, log, mention, register_help, reply, resolve_user,
+from core import (gbtn, callback, command, cooldown_ok, esc, is_admin, log, mention, register_help, reply, resolve_user,
                   target, temp_notice, watcher)
 from modules.guard import bio_card, protect_card, send_cards
 
@@ -159,7 +159,7 @@ async def cmd_biolinkallowed(update, ctx):
 
 
 def _buttons(extra=None):
-    rows = [[Btn("📢 Updates", url=UPDATES_URL), Btn("💬 Support", url=SUPPORT_URL)]]
+    rows = [[gbtn("📢 Updates", url=UPDATES_URL), gbtn("💬 Support", url=SUPPORT_URL)]]
     if extra:
         rows.insert(0, [extra])
     return Markup(rows)
