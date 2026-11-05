@@ -3,7 +3,7 @@ from telegram import InlineKeyboardButton as Btn, InlineKeyboardMarkup as Markup
 from telegram.constants import ChatType
 
 import db
-from config import START_IMAGE, SUPPORT_URL, UPDATES_URL
+from config import OWNER_URL, START_IMAGE, SUPPORT_URL
 from core import (HELP, build_message, callback, command, emo, emo_icon, emoji_ids, esc, log, mention, reply, sbtn,
                   send_log, smallcaps, user_photo)
 
@@ -67,28 +67,22 @@ async def cmd_help(update, ctx):
 def start_content(ctx, user, custom):
     sc = smallcaps
     e = lambda s: emo(s, custom)
-    text = (f"<b>{sc('welcome')}, {mention(user.id, user.first_name)}!</b>\n\n"
-            f"{e('spark')} <b>{esc(ctx.bot.first_name or 'Lisa')}</b> keeps your groups clean, safe and organised, 24/7, "
-            "with moderation, filters, welcome messages and more.\n\n"
-            f"<b>{sc('what i can do')}:</b>\n"
-            f"<blockquote>{e('moderation')} <b>Moderation</b>: ban, mute, kick, warn\n"
-            f"{e('locks')} <b>Locks &amp; Filters</b>: 24 lock types, keyword filters\n"
-            f"{e('biolink')} <b>BioLink</b>: blocks users with a link in their bio\n"
-            f"{e('nsfw')} <b>NSFW</b>: removes adult text, images and stickers\n"
-            f"{e('welcome')} <b>Welcome</b>: text or media with buttons\n"
-            f"{e('notes')} <b>Notes &amp; Rules</b>: save once, share anytime\n"
-            f"{e('federation')} <b>Federations</b>: ban a user in many groups\n"
-            f"{e('reports')} <b>Reports</b>: call the admins with @admin</blockquote>\n\n"
-            f"<b>{sc('get started')}:</b> add me to your group as an admin with the <i>Delete messages</i> and "
-            "<i>Restrict members</i> rights, then use the buttons below to explore every command.")
+    bot = esc(ctx.bot.first_name or "Lisa")
+    text = (f"👋 <b>HEY ~ {mention(user.id, user.first_name)} / ‹3, I'M</b>\n"
+            f"<b>{bot}</b>\n\n"
+            f"{e('reports')} <b>BAN • MUTE • WARN • LOCK • FILTER</b>\n"
+            "<b>— KEEP YOUR GROUP CLEAN &amp; SAFE 24/7.</b>\n\n"
+            f"{e('spark')} <b>ADD ME TO YOUR GROUP &amp; GIVE ME DELETE MESSAGES &amp; RESTRICT MEMBERS RIGHTS.</b>")
     add = f"https://t.me/{ctx.bot.username}?startgroup=true&admin=delete_messages+restrict_members+pin_messages+invite_users"
     ic = lambda s: emo_icon(s, custom)
-    kb = Markup([
-        [sbtn(sc("add me to your group"), "primary", ic("add"), url=add)],
-        [sbtn(sc("support"), "success", ic("support"), url=SUPPORT_URL), sbtn(sc("updates"), "success", ic("updates"), url=UPDATES_URL)],
-        [sbtn(sc("help"), "primary", ic("help"), callback_data="help:back")],
-    ])
-    return text, kb
+    rows = [[sbtn("➕ ADD ME IN YOUR GROUP ➕", "success", url=add)]]
+    row2 = []
+    if OWNER_URL:
+        row2.append(sbtn("💬 OWNER", "primary", url=OWNER_URL))
+    row2.append(sbtn("💁 SUPPORT", "primary", url=SUPPORT_URL))
+    rows.append(row2)
+    rows.append([sbtn("📚 HELP AND COMMANDS", "success", callback_data="help:back")])
+    return text, Markup(rows)
 
 
 @command("start")
