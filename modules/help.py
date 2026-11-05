@@ -71,7 +71,17 @@ def start_content(ctx, user, custom):
     text = (f"👋 <b>HEY ~ {mention(user.id, user.first_name)} / ‹3, I'M</b>\n"
             f"<b>{bot}</b>\n\n"
             f"{e('reports')} <b>BAN • MUTE • WARN • LOCK • FILTER</b>\n"
-            "<b>— KEEP YOUR GROUP CLEAN &amp; SAFE 24/7.</b>\n\n"
+            "<b>KEEP YOUR GROUP CLEAN &amp; SAFE 24/7.</b>\n\n"
+            "<blockquote>"
+            f"{e('moderation')} <b>Moderation</b>: ban, mute, kick, warn\n"
+            f"{e('locks')} <b>Locks &amp; Filters</b>: 24 lock types, keyword filters\n"
+            f"{e('biolink')} <b>BioLink</b>: blocks users with a link in their bio\n"
+            f"{e('nsfw')} <b>NSFW</b>: removes adult text, images and stickers\n"
+            f"{e('welcome')} <b>Welcome</b>: text or media with buttons\n"
+            f"{e('notes')} <b>Notes &amp; Rules</b>: save once, share anytime\n"
+            f"{e('federation')} <b>Federations</b>: ban a user in many groups\n"
+            f"{e('reports')} <b>Reports</b>: call the admins with @admin"
+            "</blockquote>\n\n"
             f"{e('spark')} <b>ADD ME TO YOUR GROUP &amp; GIVE ME DELETE MESSAGES &amp; RESTRICT MEMBERS RIGHTS.</b>")
     add = f"https://t.me/{ctx.bot.username}?startgroup=true&admin=delete_messages+restrict_members+pin_messages+invite_users"
     ic = lambda s: emo_icon(s, custom)
