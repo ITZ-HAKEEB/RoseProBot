@@ -7,7 +7,7 @@ import time
 
 import telegram
 
-from telegram import LinkPreviewOptions, Update
+from telegram import InlineKeyboardMarkup as Markup, LinkPreviewOptions, Update
 from telegram.constants import ChatType
 from telegram.ext import Application, CallbackQueryHandler, ChatJoinRequestHandler, ChatMemberHandler, Defaults, MessageHandler, filters
 
@@ -15,9 +15,10 @@ import config
 import core
 import db
 import modules  # noqa: F401  (registers every command / watcher / help section)
+from modules import nsfw
 from modules.joinreq import on_join_request
 from core import fmt_time, now
-from core import COMMANDS, chat_photo, user_photo, esc, is_admin, log, reply, send_log, track_chat, mention
+from core import COMMANDS, chat_link, chat_photo, sbtn, user_photo, esc, is_admin, log, reply, send_log, track_chat, mention
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
@@ -28,10 +29,23 @@ async def log_new_chat(ctx, chat, user, ev_from=None):
     ev_from = ev_from or user
     if chat.type == ChatType.PRIVATE:
         await send_log(ctx.bot, f"👤 <b>New user</b>\n{mention(user.id, user.first_name)}\nID: <code>{user.id}</code>")
-    else:
-        by = ev_from
-        await send_log(ctx.bot, f"➕ <b>New group</b>\n{esc(chat.title)}\nID: <code>{chat.id}</code>\nAdded by: {mention(by.id, by.first_name)} (<code>{by.id}</code>)",
-                       photo=await chat_photo(ctx.bot, chat.id))
+        return
+    try:
+        members = await ctx.bot.get_chat_member_count(chat.id)
+    except Exception:
+        members = "—"
+    link = await chat_link(ctx.bot, chat)
+    uname = f"@{esc(chat.username)}" if chat.username else "ɴᴏɴᴇ"
+    line = "◉" + "─" * 16 + "◉"
+    text = (f"<b>#BOT_ADDED_NEW_GROUP</b>\n\n{line}\n\n"
+            f"◎ <b>CHAT NAME</b> ▸ {esc(chat.title)}\n"
+            f"◎ <b>CHAT ID</b> ▸ <code>{chat.id}</code>\n"
+            f"◎ <b>CHAT USERNAME</b> ▸ {uname}\n"
+            f"◎ <b>CHAT LINK</b> ▸ " + (f'<a href="{esc(link)}">CLICK</a>' if link else "ɴᴏɴᴇ") + "\n"
+            f"◎ <b>GROUP MEMBERS</b> ▸ {members}\n"
+            f"◎ <b>ADDED BY</b> ▸ {mention(ev_from.id, ev_from.first_name)}\n\n{line}")
+    kb = Markup([[sbtn("#GROUP #LINK", "primary", url=link)]]) if link else None
+    await send_log(ctx.bot, text, photo=await chat_photo(ctx.bot, chat.id), reply_markup=kb)
 
 
 async def on_my_chat_member(update, ctx):
@@ -62,6 +76,7 @@ async def post_init(app):
         db_kind += " ⚠️ TEMPORARY - Heroku wipes it on restart! Set MONGO_URL (MongoDB) or DATABASE_URL (Postgres)"
         log.warning("temporary SQLite on Heroku: settings will be lost on restart")
     saved = db.count()
+    nsfw_state = await nsfw.preload()
     log.info("Database: %s, %d saved settings loaded", db_kind, saved)
     await send_log(app.bot,
         "✅ <b>BOT STARTED</b>\n"
@@ -78,6 +93,7 @@ async def post_init(app):
         "━━━━━━━━━━━━━━━━━━\n"
         f"🗄 <b>Database:</b> {db_kind}\n"
         f"💾 <b>Saved settings:</b> {saved}\n"
+        f"🔞 <b>NSFW image scan:</b> {esc(nsfw_state)}\n"
         f"🐍 <b>Python:</b> {platform.python_version()}\n"
         f"📦 <b>PTB:</b> {telegram.__version__}\n"
         f"💻 <b>Host:</b> {esc(platform.system())} {esc(platform.machine())}\n"
