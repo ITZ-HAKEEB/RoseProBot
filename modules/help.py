@@ -3,14 +3,15 @@ from telegram import InlineKeyboardButton as Btn, InlineKeyboardMarkup as Markup
 from telegram.constants import ChatType
 
 import db
-from config import SUPPORT_URL, UPDATES_URL
-from core import HELP, build_message, callback, command, esc, mention, reply, sbtn, send_log, user_photo
+from config import START_IMAGE, SUPPORT_URL, UPDATES_URL
+from core import (HELP, build_message, callback, command, emo, emo_icon, emoji_ids, esc, log, mention, reply, sbtn,
+                  send_log, smallcaps, user_photo)
 
 # Order of the buttons in /help; sections that are not listed here are appended at the end.
 HELP_ORDER = ["federation", "filters", "locks", "notes", "reports", "user", "welcome", "moderation",
               "biolink", "nsfw", "owner"]
 LABELS = {"nsfw": "NSFW", "biolink": "BioLink"}
-HELP_HEADER = "<b>Help</b>\n\nAll commands can be used with the following: / !"
+HELP_HEADER = f"<b>{smallcaps('help')}</b>\n\nAll commands can be used with the following: / !"
 
 
 def help_sections():
@@ -33,6 +34,15 @@ def help_markup():
     return Markup(rows)
 
 
+async def _show(q, ctx, text, kb):
+    """Edit the help message. The /start message has a picture, which cannot be turned into text: replace it."""
+    if q.message.photo:
+        await q.message.delete()
+        await ctx.bot.send_message(q.message.chat.id, text, reply_markup=kb)
+    else:
+        await q.message.edit_text(text, reply_markup=kb)
+
+
 @callback(r"^help:")
 async def help_cb(update, ctx):
     q = update.callback_query
@@ -41,9 +51,9 @@ async def help_cb(update, ctx):
     if arg == "close":
         await q.message.delete()
     elif arg == "back":
-        await q.message.edit_text(HELP_HEADER, reply_markup=help_markup())
+        await _show(q, ctx, HELP_HEADER, help_markup())
     elif arg in HELP:
-        await q.message.edit_text(help_text(arg), reply_markup=Markup([[sbtn("Back", "primary", callback_data="help:back")]]))
+        await _show(q, ctx, help_text(arg), Markup([[sbtn("Back", "primary", callback_data="help:back")]]))
 
 
 @command("help")
@@ -52,6 +62,33 @@ async def cmd_help(update, ctx):
         kb = Markup([[sbtn("Help", "primary", url=f"https://t.me/{ctx.bot.username}?start=help")]])
         return await reply(update, "Contact me in private for the full command list.", reply_markup=kb)
     await reply(update, HELP_HEADER, reply_markup=help_markup())
+
+
+def start_content(ctx, user, custom):
+    sc = smallcaps
+    e = lambda s: emo(s, custom)
+    text = (f"<b>{sc('welcome')}, {mention(user.id, user.first_name)}!</b>\n\n"
+            f"{e('spark')} <b>{esc(ctx.bot.first_name or 'Lisa')}</b> keeps your groups clean, safe and organised, 24/7, "
+            "with moderation, filters, welcome messages and more.\n\n"
+            f"<b>{sc('what i can do')}:</b>\n"
+            f"<blockquote>{e('moderation')} <b>Moderation</b>: ban, mute, kick, warn\n"
+            f"{e('locks')} <b>Locks &amp; Filters</b>: 24 lock types, keyword filters\n"
+            f"{e('biolink')} <b>BioLink</b>: blocks users with a link in their bio\n"
+            f"{e('nsfw')} <b>NSFW</b>: removes adult text, images and stickers\n"
+            f"{e('welcome')} <b>Welcome</b>: text or media with buttons\n"
+            f"{e('notes')} <b>Notes &amp; Rules</b>: save once, share anytime\n"
+            f"{e('federation')} <b>Federations</b>: ban a user in many groups\n"
+            f"{e('reports')} <b>Reports</b>: call the admins with @admin</blockquote>\n\n"
+            f"<b>{sc('get started')}:</b> add me to your group as an admin with the <i>Delete messages</i> and "
+            "<i>Restrict members</i> rights, then use the buttons below to explore every command.")
+    add = f"https://t.me/{ctx.bot.username}?startgroup=true&admin=delete_messages+restrict_members+pin_messages+invite_users"
+    ic = lambda s: emo_icon(s, custom)
+    kb = Markup([
+        [sbtn(sc("add me to your group"), "primary", ic("add"), url=add)],
+        [sbtn(sc("support"), "success", ic("support"), url=SUPPORT_URL), sbtn(sc("updates"), "success", ic("updates"), url=UPDATES_URL)],
+        [sbtn(sc("help"), "primary", ic("help"), callback_data="help:back")],
+    ])
+    return text, kb
 
 
 @command("start")
@@ -76,24 +113,21 @@ async def cmd_start(update, ctx):
             return await reply(update, "This chat has no rules set yet.")
         txt, kb = build_message(rules)
         return await reply(update, "<b>Rules</b>\n\n" + txt, reply_markup=kb)
-    text = (f"👋 <b>Hey {mention(user.id, user.first_name)}!</b>\n\n"
-            f"✨ I'm <b>{esc(ctx.bot.first_name or 'Lisa')}</b>, a powerful group management bot that keeps your "
-            "chats clean, safe and organised, 24/7.\n"
-            "━━━━━━━━━━━━━━━━━━\n\n"
-            "<blockquote>🛡 <b>Moderation</b>: ban, mute, kick and warn\n"
-            "🔒 <b>Locks &amp; Filters</b>: 24 lock types and keyword filters\n"
-            "🔗 <b>BioLink</b>: stops users who have a link in their bio\n"
-            "🔞 <b>NSFW</b>: removes adult text, images and stickers\n"
-            "👋 <b>Welcome</b>: text or media messages with buttons\n"
-            "📝 <b>Notes &amp; Rules</b>: save them once, share them anytime\n"
-            "🌐 <b>Federations</b>: ban a user in many groups at once\n"
-            "🚨 <b>Reports</b>: members can call the admins with @admin</blockquote>\n\n"
-            "➕ <b>Add me to your group as an admin</b> and give me the <i>Delete messages</i> and "
-            "<i>Restrict members</i> rights to get started.\n\n"
-            "Tap <b>Help</b> below to see every command 👇")
-    kb = Markup([
-        [sbtn("Add me to a group", "primary", url=f"https://t.me/{ctx.bot.username}?startgroup=true&admin=delete_messages+restrict_members+pin_messages+invite_users")],
-        [sbtn("support", "success", url=SUPPORT_URL), sbtn("updates", "success", url=UPDATES_URL)],
-        [sbtn("Help", "primary", callback_data="help:back")],
-    ])
-    await reply(update, text, reply_markup=kb)
+    custom = bool(emoji_ids())                           # premium emojis are set: try them first
+    text, kb = start_content(ctx, user, custom)
+    img = START_IMAGE
+    if not img:                                           # the bot's own profile picture, looked up once
+        if "start_photo" not in ctx.bot_data:
+            ctx.bot_data["start_photo"] = await user_photo(ctx.bot, ctx.bot.id) or ""
+        img = ctx.bot_data["start_photo"]
+    for use_custom in ((True, False) if custom else (False,)):    # premium emojis first, then plain emojis
+        text, kb = start_content(ctx, user, use_custom)
+        for pic in ((img, "") if img else ("",)):                  # then the picture, then plain text
+            try:
+                if pic:
+                    return await update.effective_message.reply_photo(pic, caption=text, reply_markup=kb)
+                return await reply(update, text, reply_markup=kb)
+            except Exception:
+                log.warning("start message failed (premium emojis: %s, picture: %s)", use_custom, bool(pic), exc_info=True)
+                if pic and not use_custom:
+                    ctx.bot_data["start_photo"] = ""               # do not try this picture again
