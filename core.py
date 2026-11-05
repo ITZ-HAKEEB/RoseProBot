@@ -163,11 +163,59 @@ async def resolve_user(update, ctx, args):
 CUSTOM_EMOJI_MD = re.compile(r"!\[([^\]\n]+)\]\(emoji:(\d+)\)")
 
 
-def sbtn(text, style=None, **kw):
-    """Inline button with an optional colour: primary (blue), success (green) or danger (red)."""
+_SC = dict(zip("abcdefghijklmnopqrstuvwxyz", "ᴀʙᴄᴅᴇꜰɢʜɪᴊᴋʟᴍɴᴏᴘǫʀꜱᴛᴜᴠᴡxʏᴢ"))
+
+
+def smallcaps(text):
+    """'add me to your group' -> 'Aᴅᴅ Mᴇ Tᴏ Yᴏᴜʀ Gʀᴏᴜᴘ' (capital first letters, small capitals after)."""
+    out, start = [], True
+    for ch in text:
+        if ch.isascii() and ch.isalpha():
+            out.append(ch.upper() if start else _SC[ch.lower()])
+            start = False
+        else:
+            out.append(ch)
+            start = ch in " -/"
+    return "".join(out)
+
+
+def sbtn(text, style=None, icon=None, **kw):
+    """Inline button with an optional colour (primary = blue, success = green, danger = red)
+    and an optional custom (premium / animated) emoji shown before the text."""
+    extra = {}
     if style:
-        kw["api_kwargs"] = {"style": style}
+        extra["style"] = style
+    if icon:
+        extra["icon_custom_emoji_id"] = str(icon)
+    if extra:
+        kw["api_kwargs"] = extra
     return Btn(text, **kw)
+
+
+# ───────────────────────── premium (custom) emojis ─────────────────────────
+# slot -> normal emoji that is shown when no premium emoji is set for the slot. The owner sets premium emojis with
+# /setemoji (see modules/emojis.py); they are stored in the database.
+EMOJI_SLOTS = {
+    "spark": "✨", "moderation": "🛡", "locks": "🔒", "biolink": "🔗", "nsfw": "🔞", "welcome": "👋",
+    "notes": "📝", "federation": "🌐", "reports": "🚨",
+    "add": "➕", "support": "💬", "updates": "📢", "help": "❓",
+}
+
+
+def emoji_ids():
+    return db.get("bot", "emoji", {}) or {}
+
+
+def emo(slot, custom=True):
+    """HTML for a slot: the premium emoji (animated for Premium users) or the normal emoji."""
+    i = emoji_ids().get(slot) if custom else None
+    fb = EMOJI_SLOTS[slot]
+    return f'<tg-emoji emoji-id="{i}">{fb}</tg-emoji>' if i else fb
+
+
+def emo_icon(slot, custom=True):
+    """Custom emoji id for a button icon, or None."""
+    return emoji_ids().get(slot) if custom else None
 
 
 def md_to_html(text):
