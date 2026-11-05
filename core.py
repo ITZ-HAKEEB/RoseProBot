@@ -428,17 +428,30 @@ async def chat_photo(bot, chat_id):
         return None
 
 
-async def send_log(bot, text, photo=None):
-    """Post to the log chat (LOG_CHANNEL_ID), with a photo when given. Never raises."""
+async def chat_link(bot, chat):
+    """Best link to a group: public @username link, else the invite link (needs the invite_users admin right)."""
+    if chat.username:
+        return f"https://t.me/{chat.username}"
+    try:
+        c = await bot.get_chat(chat.id)
+        if c.invite_link:
+            return c.invite_link
+        return await bot.export_chat_invite_link(chat.id)
+    except Exception:
+        return None
+
+
+async def send_log(bot, text, photo=None, reply_markup=None):
+    """Post to the log chat (LOG_CHANNEL_ID), with a photo / buttons when given. Never raises."""
     if not LOG_CHANNEL:
         return
     try:
         if photo:
             try:
-                return await bot.send_photo(LOG_CHANNEL, photo, caption=text[:1024])
+                return await bot.send_photo(LOG_CHANNEL, photo, caption=text[:1024], reply_markup=reply_markup)
             except Exception as e:
                 log.warning("log photo failed, sending text only: %s", e)
-        await bot.send_message(LOG_CHANNEL, text)
+        await bot.send_message(LOG_CHANNEL, text, reply_markup=reply_markup)
     except Exception as e:
         log.warning("could not write to log chat %s: %s", LOG_CHANNEL, e)
 
