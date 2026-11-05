@@ -192,6 +192,11 @@ def sbtn(text, style=None, icon=None, **kw):
     return Btn(text, **kw)
 
 
+def gbtn(text, style="success", **kw):
+    """Same as sbtn but green by default, so no button is left uncoloured."""
+    return sbtn(text, style, **kw)
+
+
 # ───────────────────────── premium (custom) emojis ─────────────────────────
 # slot -> normal emoji that is shown when no premium emoji is set for the slot. The owner sets premium emojis with
 # /setemoji (see modules/emojis.py); they are stored in the database.
@@ -307,7 +312,7 @@ def parse_buttons(raw, link_lines=False):
         if state["n"] >= MAX_BUTTONS:
             state["err"] = state["err"] or f"Too many buttons (max {MAX_BUTTONS})."
             return ""
-        style = next((x for x in BUTTON_STYLES if x in mods), None)
+        style = next((x for x in BUTTON_STYLES if x in mods), "success")
         b = Btn(label, url=url, **({"api_kwargs": {"style": style}} if style else {}))
         if "same" in mods and rows and len(rows[-1]) < BUTTONS_PER_ROW:
             rows[-1].append(b)
