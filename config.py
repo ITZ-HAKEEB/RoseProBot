@@ -24,6 +24,6 @@ JOIN_PHOTO = os.environ.get("JOIN_PHOTO", "https://anya-file-host.vercel.app/qc4
 FOOTER_TEXT = os.environ.get("FOOTER_TEXT", "Updates")
 # Picture on top of the /start message: a direct image URL or a Telegram file_id.
 # Empty = the bot's own profile picture is used (and plain text if it has none).
-START_IMAGE = os.environ.get("START_IMAGE", "").strip()
+START_IMAGE = os.environ.get("START_IMAGE", "https://anya-file-host.vercel.app/qc4i7ivins").strip()
 
 
