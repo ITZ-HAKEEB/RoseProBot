@@ -85,13 +85,13 @@ def start_content(ctx, user, custom):
             f"{e('spark')} <b>ADD ME TO YOUR GROUP &amp; GIVE ME DELETE MESSAGES &amp; RESTRICT MEMBERS RIGHTS.</b>")
     add = f"https://t.me/{ctx.bot.username}?startgroup=true&admin=delete_messages+restrict_members+pin_messages+invite_users"
     ic = lambda s: emo_icon(s, custom)
-    rows = [[sbtn("➕ ADD ME IN YOUR GROUP ➕", "success", url=add)]]
+    rows = [[sbtn("ᴧᴅᴅ ᴍᴇ вᴧʙʏ", "success", url=add)]]
     row2 = []
     if OWNER_URL:
-        row2.append(sbtn("💬 OWNER", "primary", url=OWNER_URL))
-    row2.append(sbtn("💁 SUPPORT", "primary", url=SUPPORT_URL))
+        row2.append(sbtn("ᴏᴡɴᴇʀ", "primary", url=OWNER_URL))
+    row2.append(sbtn("sυᴘᴘᴏʀᴛ", "primary", url=SUPPORT_URL))
     rows.append(row2)
-    rows.append([sbtn("📚 HELP AND COMMANDS", "success", callback_data="help:back")])
+    rows.append([sbtn("ʜᴇʟᴘ ᴧɴᴅ ᴄᴏᴍᴍᴧɴᴅs", "success", callback_data="help:back")])
     return text, Markup(rows)
 
 
