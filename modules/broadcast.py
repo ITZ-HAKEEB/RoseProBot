@@ -1,4 +1,5 @@
 """Owner-only broadcast system.
+
 Default: Groups only.
 -user: Groups first, then all users.
 -pin: Pin delivered messages where permitted.
@@ -6,21 +7,48 @@ Supports text and replied messages.
 """
 
 import asyncio
+import re
 
 from telegram.error import Forbidden, BadRequest, RetryAfter
 
 import db
 from config import SUDO
 from core import (
-    args_text,
-    command,
     esc,
     log,
     register_help,
     reply,
     send_log,
+    command,
 )
 
+
+# ==========================================================
+# OWNER CONFIGURATION
+# ==========================================================
+
+def get_sudo_ids():
+    """Convert SUDO IDs into integers safely."""
+
+    if isinstance(SUDO, (str, int)):
+        values = str(SUDO).replace(",", " ").split()
+    else:
+        values = SUDO or []
+
+    result = set()
+
+    for value in values:
+        try:
+            result.add(int(value))
+        except (ValueError, TypeError):
+            continue
+
+    return result
+
+
+# ==========================================================
+# HELP
+# ==========================================================
 
 register_help("owner", [
     (
@@ -30,10 +58,25 @@ register_help("owner", [
 ])
 
 
-async def broadcast_to_scope(ctx, scope, pin=False, src=None, text=None):
-    """Broadcast to one database scope and return statistics."""
+# ==========================================================
+# BROADCAST ENGINE
+# ==========================================================
 
-    targets = list(db.scope_keys(scope))
+async def broadcast_to_scope(ctx, scope, pin=False, src=None, text=None):
+
+    try:
+        targets = list(db.scope_keys(scope))
+    except Exception as e:
+        log.exception("Could not fetch broadcast targets: %s", e)
+
+        return {
+            "total": 0,
+            "sent": 0,
+            "failed": 0,
+            "removed": 0,
+            "pinned": 0,
+            "error": str(e),
+        }
 
     sent_count = 0
     failed_count = 0
@@ -41,17 +84,20 @@ async def broadcast_to_scope(ctx, scope, pin=False, src=None, text=None):
     pinned_count = 0
 
     for key in targets:
+
         try:
             chat_id = int(key)
 
             while True:
                 try:
+
                     if src:
                         sent = await ctx.bot.copy_message(
                             chat_id=chat_id,
                             from_chat_id=src.chat.id,
                             message_id=src.message_id,
                         )
+
                     else:
                         sent = await ctx.bot.send_message(
                             chat_id=chat_id,
@@ -60,18 +106,21 @@ async def broadcast_to_scope(ctx, scope, pin=False, src=None, text=None):
 
                     sent_count += 1
 
+                    # PIN MESSAGE
                     if pin:
+
                         try:
                             await ctx.bot.pin_chat_message(
                                 chat_id=chat_id,
                                 message_id=sent.message_id,
                                 disable_notification=True,
                             )
+
                             pinned_count += 1
 
                         except Exception as pin_error:
                             log.warning(
-                                "Could not pin message in %s: %s",
+                                "Pin failed in %s: %s",
                                 chat_id,
                                 pin_error,
                             )
@@ -79,39 +128,54 @@ async def broadcast_to_scope(ctx, scope, pin=False, src=None, text=None):
                     break
 
                 except RetryAfter as e:
-                    wait_time = (
-                        e.retry_after.total_seconds()
-                        if hasattr(e.retry_after, "total_seconds")
-                        else float(e.retry_after)
+
+                    wait_time = getattr(e, "retry_after", 5)
+
+                    if hasattr(wait_time, "total_seconds"):
+                        wait_time = wait_time.total_seconds()
+
+                    wait_time = float(wait_time)
+
+                    log.warning(
+                        "Telegram rate limit. Waiting %.2f seconds",
+                        wait_time,
                     )
+
                     await asyncio.sleep(wait_time + 1)
 
         except (Forbidden, BadRequest) as e:
+
             failed_count += 1
 
+            # Remove inaccessible users/groups
             try:
                 db.delete(scope, key)
-            except Exception:
-                db.delete(scope, int(key))
+                removed_count += 1
 
-            removed_count += 1
+            except Exception as delete_error:
+                log.warning(
+                    "Database removal failed for %s: %s",
+                    key,
+                    delete_error,
+                )
 
             log.warning(
-                "Removed inaccessible chat %s: %s",
+                "Broadcast target unavailable %s: %s",
                 key,
                 e,
             )
 
         except Exception as e:
+
             failed_count += 1
 
-            log.warning(
+            log.exception(
                 "Broadcast failed for %s: %s",
                 key,
                 e,
             )
 
-        # Telegram rate limit protection
+        # Rate-limit protection
         await asyncio.sleep(0.05)
 
     return {
@@ -123,8 +187,11 @@ async def broadcast_to_scope(ctx, scope, pin=False, src=None, text=None):
     }
 
 
+# ==========================================================
+# REPORT GENERATOR
+# ==========================================================
+
 def broadcast_report(title, stats, pin=False):
-    """Create separate group/user broadcast report."""
 
     report = (
         f"<b>{title}</b>\n"
@@ -138,36 +205,43 @@ def broadcast_report(title, stats, pin=False):
     if pin:
         report += f"📌 Pinned: {stats['pinned']}\n"
 
+    if stats.get("error"):
+        report += f"\n⚠️ Error: {esc(stats['error'])}\n"
+
     report += "━━━━━━━━━━━━━━━━━━"
 
     return report
 
 
-@command("broadcast")
-async def cmd_broadcast(update, ctx):
+# ==========================================================
+# COMMAND ARGUMENT PARSER
+# ==========================================================
 
-    msg = update.effective_message
-    user = update.effective_user
+def parse_broadcast_args(msg):
 
-    # Owner / SUDO protection
-    if not user or user.id not in SUDO:
-        return
+    raw = msg.text or msg.caption or ""
 
-    text = args_text(msg).strip()
+    # Remove /broadcast and optional @botusername
+    parts = raw.split(maxsplit=1)
 
-    # Default: Groups only
+    text = parts[1].strip() if len(parts) > 1 else ""
+
     include_users = False
-    pin = False
     include_groups = True
+    pin = False
 
     # Parse flags
-    while text.startswith("-"):
+    while text:
 
-        flag, _, rest = text.partition(" ")
-        flag = flag.lower()
+        match = re.match(r"^(-[a-zA-Z]+)(?:\s+|$)", text)
 
-        if flag in ("-user", "-users"):
-            # -user means BOTH groups and users
+        if not match:
+            break
+
+        flag = match.group(1).lower()
+        text = text[match.end():].strip()
+
+        if flag in ("-user", "-users", "-all"):
             include_users = True
             include_groups = True
 
@@ -175,41 +249,87 @@ async def cmd_broadcast(update, ctx):
             include_groups = True
             include_users = False
 
-        elif flag == "-all":
-            include_groups = True
-            include_users = True
-
         elif flag == "-pin":
             pin = True
 
         else:
+            # Unknown flag: preserve remaining text
+            text = flag + " " + text
             break
 
-        text = rest.strip()
+    return text, include_groups, include_users, pin
+
+
+# ==========================================================
+# BROADCAST COMMAND
+# ==========================================================
+
+@command("broadcast")
+async def cmd_broadcast(update, ctx):
+
+    msg = update.effective_message
+    user = update.effective_user
+
+    # ==========================================
+    # OWNER CHECK
+    # ==========================================
+
+    if not user:
+        return
+
+    if user.id not in get_sudo_ids():
+
+        return await reply(
+            update,
+            "❌ <b>You are not authorized to use this command.</b>"
+        )
+
+    # ==========================================
+    # PARSE ARGUMENTS
+    # ==========================================
+
+    text, include_groups, include_users, pin = (
+        parse_broadcast_args(msg)
+    )
 
     # Replied message support
     src = msg.reply_to_message
 
     if not src and not text:
+
         return await reply(
             update,
             "❌ <b>Broadcast Usage</b>\n\n"
-            "/broadcast <code>text</code> - Groups only\n"
-            "/broadcast -user <code>text</code> - Groups + Users\n"
-            "/broadcast -pin <code>text</code> - Groups + Pin\n"
-            "/broadcast -user -pin <code>text</code> - Groups + Users + Pin\n\n"
-            "You can also reply to any message with these commands."
+            "📢 <code>/broadcast Your message</code>\n"
+            "👥 <code>/broadcast -user Your message</code>\n"
+            "📌 <code>/broadcast -pin Your message</code>\n"
+            "🔥 <code>/broadcast -user -pin Your message</code>\n\n"
+            "<b>Reply Method:</b>\n"
+            "Reply to any message with:\n"
+            "<code>/broadcast -user</code>\n\n"
+            "Default broadcast: Groups only."
         )
 
-    # Initial status
+    # ==========================================
+    # START STATUS
+    # ==========================================
+
+    try:
+
+        status = await reply(
+            update,
+            "📢 <b>BROADCAST STARTED</b>\n\n"
+            "⚙️ Preparing broadcast...\n"
+            "⏳ Please wait."
+        )
+
+    except Exception as e:
+
+        log.exception("Could not send broadcast status: %s", e)
+        return
+
     group_stats = None
     user_stats = None
-
-    status = await reply(
-        update,
-        "📢 <b>Broadcast Started</b>\n\n"
-        "⏳ Preparing group broadcast..."
-    )
 
     # ==========================================
     # STEP 1: GROUP BROADCAST
@@ -217,31 +337,48 @@ async def cmd_broadcast(update, ctx):
 
     if include_groups:
 
-        group_stats = await broadcast_to_scope(
-            ctx=ctx,
-            scope="bc_chats",
-            pin=pin,
-            src=src,
-            text=text,
-        )
+        try:
 
-        group_report = broadcast_report(
-            "📢 GROUP BROADCAST COMPLETED",
-            group_stats,
-            pin,
-        )
-
-        # Show group report BEFORE starting users
-        if include_users:
             await status.edit_text(
-                group_report
-                + "\n\n⏳ <b>Now starting user broadcast...</b>"
+                "📢 <b>GROUP BROADCAST</b>\n\n"
+                "⏳ Sending messages to groups..."
             )
 
-        else:
+            group_stats = await broadcast_to_scope(
+                ctx=ctx,
+                scope="bc_chats",
+                pin=pin,
+                src=src,
+                text=text,
+            )
+
+            group_report = broadcast_report(
+                "📢 GROUP BROADCAST COMPLETED",
+                group_stats,
+                pin,
+            )
+
+            if include_users:
+
+                await status.edit_text(
+                    group_report
+                    + "\n\n⏳ <b>Now starting user broadcast...</b>"
+                )
+
+            else:
+
+                await status.edit_text(
+                    group_report
+                    + "\n\n✅ <b>BROADCAST COMPLETED!</b>"
+                )
+
+        except Exception as e:
+
+            log.exception("Group broadcast error: %s", e)
+
             await status.edit_text(
-                group_report
-                + "\n\n✅ <b>Broadcast Completed!</b>"
+                "❌ <b>Group broadcast error</b>\n\n"
+                f"<code>{esc(str(e))}</code>"
             )
 
     # ==========================================
@@ -250,37 +387,69 @@ async def cmd_broadcast(update, ctx):
 
     if include_users:
 
-        user_stats = await broadcast_to_scope(
-            ctx=ctx,
-            scope="bc_users",
-            pin=pin,
-            src=src,
-            text=text,
-        )
+        try:
 
-        user_report = broadcast_report(
-            "👤 USER BROADCAST COMPLETED",
-            user_stats,
-            pin,
-        )
-
-        # Final report with separate group and user results
-        final_report = (
-            "✅ <b>BROADCAST COMPLETED</b>\n\n"
-            + (
-                broadcast_report(
-                    "📢 GROUP REPORT",
-                    group_stats,
-                    pin,
+            await status.edit_text(
+                (
+                    broadcast_report(
+                        "📢 GROUP REPORT",
+                        group_stats,
+                        pin,
+                    )
+                    if group_stats else
+                    "📢 <b>Group broadcast skipped.</b>"
                 )
-                if group_stats else ""
+                + "\n\n👥 <b>USER BROADCAST STARTED</b>\n"
+                "⏳ Sending messages to users..."
             )
-            + "\n\n"
-            + user_report
-            + "\n\n🎉 <b>All Broadcast Tasks Finished!</b>"
-        )
 
-        await status.edit_text(final_report)
+            user_stats = await broadcast_to_scope(
+                ctx=ctx,
+                scope="bc_users",
+                pin=pin,
+                src=src,
+                text=text,
+            )
+
+            user_report = broadcast_report(
+                "👤 USER BROADCAST COMPLETED",
+                user_stats,
+                pin,
+            )
+
+            # ==================================
+            # FINAL REPORT
+            # ==================================
+
+            final_report = (
+                "✅ <b>BROADCAST COMPLETED</b>\n\n"
+                + (
+                    broadcast_report(
+                        "📢 GROUP REPORT",
+                        group_stats,
+                        pin,
+                    )
+                    if group_stats else
+                    "📢 <b>GROUP REPORT</b>\nNot executed."
+                )
+                + "\n\n"
+                + user_report
+                + "\n\n🎉 <b>ALL BROADCAST TASKS FINISHED!</b>"
+            )
+
+            await status.edit_text(final_report)
+
+        except Exception as e:
+
+            log.exception("User broadcast error: %s", e)
+
+            try:
+                await status.edit_text(
+                    "❌ <b>User broadcast error</b>\n\n"
+                    f"<code>{esc(str(e))}</code>"
+                )
+            except Exception:
+                pass
 
     # ==========================================
     # STEP 3: LOG REPORT
@@ -293,7 +462,7 @@ async def cmd_broadcast(update, ctx):
     user_failed = user_stats["failed"] if user_stats else 0
 
     log_text = (
-        f"📢 <b>Broadcast Completed</b>\n\n"
+        "📢 <b>Broadcast Completed</b>\n\n"
         f"👤 By: {esc(user.first_name)}\n"
         f"🆔 ID: <code>{user.id}</code>\n\n"
         f"📢 Groups Sent: {group_sent}\n"
@@ -303,4 +472,8 @@ async def cmd_broadcast(update, ctx):
         f"📌 Pin: {'Enabled' if pin else 'Disabled'}"
     )
 
-    await send_log(ctx.bot, log_text)
+    try:
+        await send_log(ctx.bot, log_text)
+
+    except Exception as e:
+        log.exception("Broadcast log failed: %s", e)
